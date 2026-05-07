@@ -1,0 +1,18 @@
+{
+    "empresa": "ALPES GESTÃO E FACILITIES",
+    "email": "gestao1@alpesfacilities.com.br",
+    "telefone": "(66) 99206-8864",
+    "endereco": "Avenida Luiz Amadeu Lodi, 1141, Sala 03, Centro Norte, Sorriso MT, 78890-000, Brasil",
+    "logo": "C:\\Users\\Dell\\Desktop\\Alpes Gestão e Facilities\\logo_Logotipo vertical negativo.png",
+    "estoque_minimo_padrao": 1,
+    "alerta_estoque": true,
+    "permitir_negativo": false,
+    "tema": "dark",
+    "cor_principal": "#6157ff",
+    "fonte": "Inter",
+    "ultimo_backup": "Nunca",
+    "supervisores_frequencia": {
+        "TMG BASE SORRISO": "",
+        "TMG BASE RONDONOPOLIS": ""
+    }
+}

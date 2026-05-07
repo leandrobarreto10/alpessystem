@@ -1,0 +1,12 @@
+services:
+  alpes-sistema:
+    build: .
+    container_name: alpes-sistema
+    restart: unless-stopped
+    ports:
+      - "8502:8502"
+    environment:
+      - ALPES_DATA_DIR=/app/dados
+    volumes:
+      - ./dados:/app/dados
+      - ./backups:/app/backups
