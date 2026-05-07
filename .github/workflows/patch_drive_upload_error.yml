@@ -1,0 +1,75 @@
+name: Patch Google Drive upload error handling
+
+on:
+  push:
+    paths:
+      - '.github/workflows/patch_drive_upload_error.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch drive upload
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('app.py')
+          text = path.read_text(encoding='utf-8')
+          original = text
+          start = text.find('def drive_upload_arquivo(caminho_local):')
+          end = text.find('\n\ndef sincronizar_drive_inicio():', start)
+          if start == -1 or end == -1:
+              raise SystemExit('drive_upload_arquivo block not found')
+
+          new_block = '''def drive_upload_arquivo(caminho_local):
+    try:
+        service = obter_google_service()
+        if not service or not os.path.isfile(caminho_local):
+            return False
+        caminho_relativo = drive_relativo(caminho_local)
+        pasta_rel = os.path.dirname(caminho_relativo).replace("\\\\", "/")
+        pasta_id = drive_garantir_pasta(pasta_rel)
+        if not pasta_id:
+            return False
+        media = MediaFileUpload(caminho_local, resumable=False)
+        existente = drive_encontrar_arquivo(caminho_relativo)
+        if existente:
+            service.files().update(fileId=existente["id"], media_body=media).execute()
+        else:
+            criado = service.files().create(
+                body={"name": os.path.basename(caminho_local), "parents": [pasta_id]},
+                media_body=media,
+                fields="id, name, mimeType, modifiedTime"
+            ).execute()
+            _drive_arquivos_cache[caminho_relativo] = criado
+        return True
+    except Exception as erro:
+        try:
+            st.session_state["ultimo_erro_google_drive"] = str(erro)[:500]
+        except Exception:
+            pass
+        return False
+'''
+          text = text[:start] + new_block + text[end:]
+          if text != original:
+              path.write_text(text, encoding='utf-8')
+          PY
+      - name: Validate
+        run: python -m py_compile app.py
+      - name: Commit changes
+        run: |
+          if git diff --quiet app.py; then
+            echo "No app.py changes needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add app.py
+          git commit -m "Handle Google Drive upload failures"
+          git push
