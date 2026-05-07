@@ -33,7 +33,7 @@ jobs:
         if not service or not os.path.isfile(caminho_local):
             return False
         caminho_relativo = drive_relativo(caminho_local)
-        pasta_rel = os.path.dirname(caminho_relativo).replace("\\\\", "/")
+        pasta_rel = os.path.dirname(caminho_relativo).replace("\\", "/")
         pasta_id = drive_garantir_pasta(pasta_rel)
         if not pasta_id:
             return False
@@ -73,3 +73,5 @@ jobs:
           git add app.py
           git commit -m "Handle Google Drive upload failures"
           git push
+
+# trigger: 2026-05-07 drive upload error handling
