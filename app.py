@@ -9,6 +9,15 @@ import hashlib
 import shutil
 import zipfile
 import base64
+try:
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+except Exception:
+    service_account = None
+    build = None
+    MediaFileUpload = None
+    MediaIoBaseDownload = None
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Image as RLImage, Paragraph, Spacer
 from reportlab.lib import colors
@@ -30,6 +39,212 @@ st.dataframe = dataframe_sem_indice
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("ALPES_DATA_DIR", BASE_DIR)
 os.makedirs(DATA_DIR, exist_ok=True)
+_drive_service_cache = None
+_drive_pastas_cache = {}
+_drive_arquivos_cache = {}
+
+
+def obter_config_secreta(nome, padrao=""):
+    valor = os.environ.get(nome)
+    if valor:
+        return valor
+    try:
+        return st.secrets.get(nome, padrao)
+    except Exception:
+        return padrao
+
+
+def google_drive_configurado():
+    return bool(
+        service_account
+        and build
+        and MediaFileUpload
+        and MediaIoBaseDownload
+        and obter_config_secreta("GOOGLE_DRIVE_FOLDER_ID", "")
+    )
+
+
+def obter_google_service():
+    global _drive_service_cache
+    if _drive_service_cache is not None:
+        return _drive_service_cache
+    if not google_drive_configurado():
+        return None
+
+    info_conta = None
+    service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    if service_account_json:
+        info_conta = json.loads(service_account_json)
+    else:
+        try:
+            if "google_service_account" in st.secrets:
+                info_conta = dict(st.secrets["google_service_account"])
+            elif "GOOGLE_SERVICE_ACCOUNT_INFO" in st.secrets:
+                info_conta = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT_INFO"])
+        except Exception:
+            info_conta = None
+
+    if not info_conta:
+        return None
+
+    try:
+        credenciais = service_account.Credentials.from_service_account_info(
+            info_conta,
+            scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        _drive_service_cache = build("drive", "v3", credentials=credenciais, cache_discovery=False)
+        return _drive_service_cache
+    except Exception:
+        return None
+
+
+def drive_relativo(caminho):
+    return os.path.relpath(caminho, DATA_DIR).replace("\\", "/")
+
+
+def drive_listar_filhos(pasta_id):
+    service = obter_google_service()
+    if not service:
+        return []
+    itens = []
+    token = None
+    while True:
+        resposta = service.files().list(
+            q=f"'{pasta_id}' in parents and trashed=false",
+            fields="nextPageToken, files(id, name, mimeType, modifiedTime)",
+            pageToken=token
+        ).execute()
+        itens.extend(resposta.get("files", []))
+        token = resposta.get("nextPageToken")
+        if not token:
+            break
+    return itens
+
+
+def drive_garantir_pasta(caminho_relativo):
+    service = obter_google_service()
+    pasta_raiz = obter_config_secreta("GOOGLE_DRIVE_FOLDER_ID", "")
+    if not service or not pasta_raiz:
+        return None
+    if not caminho_relativo:
+        return pasta_raiz
+    if caminho_relativo in _drive_pastas_cache:
+        return _drive_pastas_cache[caminho_relativo]
+
+    pai = pasta_raiz
+    partes = [p for p in caminho_relativo.replace("\\", "/").split("/") if p]
+    caminho_atual = ""
+    for parte in partes:
+        caminho_atual = f"{caminho_atual}/{parte}".strip("/")
+        if caminho_atual in _drive_pastas_cache:
+            pai = _drive_pastas_cache[caminho_atual]
+            continue
+        existentes = [
+            item for item in drive_listar_filhos(pai)
+            if item["name"] == parte and item["mimeType"] == "application/vnd.google-apps.folder"
+        ]
+        if existentes:
+            pai = existentes[0]["id"]
+        else:
+            criado = service.files().create(
+                body={
+                    "name": parte,
+                    "mimeType": "application/vnd.google-apps.folder",
+                    "parents": [pai]
+                },
+                fields="id"
+            ).execute()
+            pai = criado["id"]
+        _drive_pastas_cache[caminho_atual] = pai
+    return pai
+
+
+def drive_encontrar_arquivo(caminho_relativo):
+    if caminho_relativo in _drive_arquivos_cache:
+        return _drive_arquivos_cache[caminho_relativo]
+    pasta_rel = os.path.dirname(caminho_relativo).replace("\\", "/")
+    nome = os.path.basename(caminho_relativo)
+    pasta_id = drive_garantir_pasta(pasta_rel)
+    if not pasta_id:
+        return None
+    for item in drive_listar_filhos(pasta_id):
+        if item["name"] == nome and item["mimeType"] != "application/vnd.google-apps.folder":
+            _drive_arquivos_cache[caminho_relativo] = item
+            return item
+    return None
+
+
+def drive_baixar_arquivo(caminho_local, caminho_relativo):
+    service = obter_google_service()
+    item = drive_encontrar_arquivo(caminho_relativo)
+    if not service or not item:
+        return False
+    os.makedirs(os.path.dirname(caminho_local), exist_ok=True)
+    requisicao = service.files().get_media(fileId=item["id"])
+    with io.FileIO(caminho_local, "wb") as arquivo:
+        downloader = MediaIoBaseDownload(arquivo, requisicao)
+        concluido = False
+        while not concluido:
+            _, concluido = downloader.next_chunk()
+    return True
+
+
+def drive_upload_arquivo(caminho_local):
+    service = obter_google_service()
+    if not service or not os.path.isfile(caminho_local):
+        return False
+    caminho_relativo = drive_relativo(caminho_local)
+    pasta_rel = os.path.dirname(caminho_relativo).replace("\\", "/")
+    pasta_id = drive_garantir_pasta(pasta_rel)
+    if not pasta_id:
+        return False
+    media = MediaFileUpload(caminho_local, resumable=False)
+    existente = drive_encontrar_arquivo(caminho_relativo)
+    if existente:
+        service.files().update(fileId=existente["id"], media_body=media).execute()
+    else:
+        criado = service.files().create(
+            body={"name": os.path.basename(caminho_local), "parents": [pasta_id]},
+            media_body=media,
+            fields="id, name, mimeType, modifiedTime"
+        ).execute()
+        _drive_arquivos_cache[caminho_relativo] = criado
+    return True
+
+
+def sincronizar_drive_inicio():
+    service = obter_google_service()
+    pasta_raiz = obter_config_secreta("GOOGLE_DRIVE_FOLDER_ID", "")
+    if not service or not pasta_raiz:
+        return
+
+    def percorrer(pasta_id, rel_pasta=""):
+        for item in drive_listar_filhos(pasta_id):
+            rel_item = f"{rel_pasta}/{item['name']}".strip("/")
+            if item["mimeType"] == "application/vnd.google-apps.folder":
+                _drive_pastas_cache[rel_item] = item["id"]
+                os.makedirs(os.path.join(DATA_DIR, rel_item), exist_ok=True)
+                percorrer(item["id"], rel_item)
+            else:
+                _drive_arquivos_cache[rel_item] = item
+                drive_baixar_arquivo(os.path.join(DATA_DIR, rel_item), rel_item)
+
+    percorrer(pasta_raiz)
+
+
+_pandas_to_excel_original = pd.DataFrame.to_excel
+
+
+def dataframe_to_excel_com_drive(self, excel_writer, *args, **kwargs):
+    resultado = _pandas_to_excel_original(self, excel_writer, *args, **kwargs)
+    if isinstance(excel_writer, (str, os.PathLike)):
+        caminho_excel = os.path.abspath(os.fspath(excel_writer))
+        if caminho_excel.startswith(os.path.abspath(DATA_DIR)):
+            drive_upload_arquivo(caminho_excel)
+    return resultado
+
+
+pd.DataFrame.to_excel = dataframe_to_excel_com_drive
 
 
 def caminho_dados(nome):
@@ -73,6 +288,7 @@ HOME_IMAGE = os.path.join(PASTA_IMAGENS_SISTEMA, "inicio.jpg")
 LOGIN_IMAGE = os.path.join(PASTA_IMAGENS_SISTEMA, "login.jpg")
 HOME_IMAGE_FALLBACK = os.path.join(BASE_DIR, "Desktop 1.jpg")
 BASES_FREQUENCIA = ["TMG BASE SORRISO", "TMG BASE RONDONOPOLIS"]
+sincronizar_drive_inicio()
 
 
 # =========================
@@ -91,6 +307,7 @@ def carregar_json(caminho, padrao):
 def salvar_json(caminho, dados):
     with open(caminho, "w", encoding="utf-8") as arquivo:
         json.dump(dados, arquivo, ensure_ascii=False, indent=4)
+    drive_upload_arquivo(caminho)
 
 
 def garantir_pasta_imagens_sistema():
@@ -1348,6 +1565,7 @@ def salvar_anexo_frota(arquivo, placa, tipo_lancamento):
     caminho = os.path.join(PASTA_ANEXOS_FROTAS, f"{prefixo}_{placa_limpa}_{tipo_lancamento}_{nome_limpo}")
     with open(caminho, "wb") as destino:
         destino.write(arquivo.getbuffer())
+    drive_upload_arquivo(caminho)
     return caminho
 
 
@@ -1368,6 +1586,7 @@ def salvar_imagem_produto(arquivo, codigo, produto):
         contador += 1
     with open(caminho, "wb") as destino:
         destino.write(arquivo.getbuffer())
+    drive_upload_arquivo(caminho)
     return nome_arquivo
 
 
@@ -4566,6 +4785,7 @@ elif menu == "ORÇAMENTOS":
                     caminho_anexo = os.path.join(PASTA_ANEXOS_ORCAMENTOS, f"{numero}_{nome_seguro}")
                     with open(caminho_anexo, "wb") as arquivo:
                         arquivo.write(anexo_orcamento.getbuffer())
+                    drive_upload_arquivo(caminho_anexo)
                 novo = pd.DataFrame([{"numero": numero, "data": data_orcamento.isoformat(), "validade": validade.isoformat(), "cliente": "" if cliente == "Não Informado" else cliente, "fornecedor": "" if fornecedor == "Não Informado" else fornecedor, "veiculo": "" if veiculo == "Não Informado" else veiculo, "tipo": tipo, "descricao": descricao, "quantidade": float(quantidade), "valor_unitario": float(valor_unitario), "valor_total": valor_total, "status": "Em Aberto", "anexo": caminho_anexo, "observacoes": observacoes}])
                 df_orcamentos = pd.concat([df_orcamentos, novo], ignore_index=True)
                 df_orcamentos.to_excel(ORCAMENTOS_XLSX, index=False)
@@ -4658,6 +4878,7 @@ elif menu == "CONFIGURAÇÕES":
                         logo_path = os.path.join(BASE_DIR, f"logo_{logo.name}")
                         with open(logo_path, "wb") as arquivo:
                             arquivo.write(logo.getbuffer())
+                        drive_upload_arquivo(logo_path) if os.path.abspath(logo_path).startswith(os.path.abspath(DATA_DIR)) else None
                         config["logo"] = logo_path
                     salvar_json(CONFIG_JSON, config)
                     st.success("Configurações gerais salvas.")
