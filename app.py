@@ -12,10 +12,12 @@ import base64
 try:
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
     from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 except Exception:
     service_account = None
     build = None
+    HttpError = None
     MediaFileUpload = None
     MediaIoBaseDownload = None
 from reportlab.lib.pagesizes import letter, landscape
@@ -102,22 +104,38 @@ def drive_relativo(caminho):
     return os.path.relpath(caminho, DATA_DIR).replace("\\", "/")
 
 
+def drive_guardar_erro(erro):
+    try:
+        if HttpError and isinstance(erro, HttpError):
+            conteudo = erro.content.decode("utf-8", errors="ignore") if getattr(erro, "content", None) else str(erro)
+            st.session_state["ultimo_erro_google_drive"] = conteudo[:700]
+        else:
+            st.session_state["ultimo_erro_google_drive"] = str(erro)[:700]
+    except Exception:
+        pass
+
+
 def drive_listar_filhos(pasta_id):
     service = obter_google_service()
     if not service:
         return []
     itens = []
     token = None
-    while True:
-        resposta = service.files().list(
-            q=f"'{pasta_id}' in parents and trashed=false",
-            fields="nextPageToken, files(id, name, mimeType, modifiedTime)",
-            pageToken=token
-        ).execute()
-        itens.extend(resposta.get("files", []))
-        token = resposta.get("nextPageToken")
-        if not token:
-            break
+    try:
+        while True:
+            resposta = service.files().list(
+                q=f"'{pasta_id}' in parents and trashed=false",
+                fields="nextPageToken, files(id, name, mimeType, modifiedTime)",
+                pageToken=token,
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True
+            ).execute()
+            itens.extend(resposta.get("files", []))
+            token = resposta.get("nextPageToken")
+            if not token:
+                break
+    except Exception as erro:
+        drive_guardar_erro(erro)
     return itens
 
 
@@ -152,7 +170,8 @@ def drive_garantir_pasta(caminho_relativo):
                     "mimeType": "application/vnd.google-apps.folder",
                     "parents": [pai]
                 },
-                fields="id"
+                fields="id",
+                supportsAllDrives=True
             ).execute()
             pai = criado["id"]
         _drive_pastas_cache[caminho_atual] = pai
@@ -180,13 +199,17 @@ def drive_baixar_arquivo(caminho_local, caminho_relativo):
     if not service or not item:
         return False
     os.makedirs(os.path.dirname(caminho_local), exist_ok=True)
-    requisicao = service.files().get_media(fileId=item["id"])
-    with io.FileIO(caminho_local, "wb") as arquivo:
-        downloader = MediaIoBaseDownload(arquivo, requisicao)
-        concluido = False
-        while not concluido:
-            _, concluido = downloader.next_chunk()
-    return True
+    try:
+        requisicao = service.files().get_media(fileId=item["id"], supportsAllDrives=True)
+        with io.FileIO(caminho_local, "wb") as arquivo:
+            downloader = MediaIoBaseDownload(arquivo, requisicao)
+            concluido = False
+            while not concluido:
+                _, concluido = downloader.next_chunk()
+        return True
+    except Exception as erro:
+        drive_guardar_erro(erro)
+        return False
 
 
 def drive_upload_arquivo(caminho_local):
@@ -202,20 +225,24 @@ def drive_upload_arquivo(caminho_local):
         media = MediaFileUpload(caminho_local, resumable=False)
         existente = drive_encontrar_arquivo(caminho_relativo)
         if existente:
-            service.files().update(fileId=existente["id"], media_body=media).execute()
+            atualizado = service.files().update(
+                fileId=existente["id"],
+                media_body=media,
+                fields="id, name, mimeType, modifiedTime",
+                supportsAllDrives=True
+            ).execute()
+            _drive_arquivos_cache[caminho_relativo] = atualizado
         else:
             criado = service.files().create(
                 body={"name": os.path.basename(caminho_local), "parents": [pasta_id]},
                 media_body=media,
-                fields="id, name, mimeType, modifiedTime"
+                fields="id, name, mimeType, modifiedTime",
+                supportsAllDrives=True
             ).execute()
             _drive_arquivos_cache[caminho_relativo] = criado
         return True
     except Exception as erro:
-        try:
-            st.session_state["ultimo_erro_google_drive"] = str(erro)[:500]
-        except Exception:
-            pass
+        drive_guardar_erro(erro)
         return False
 
 
