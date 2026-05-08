@@ -1760,6 +1760,51 @@ def gerar_backup():
     return zip_path
 
 
+def solicitar_saida_com_backup():
+    st.session_state["confirmar_saida_backup"] = True
+    st.rerun()
+
+
+def concluir_saida():
+    st.session_state["autenticado"] = False
+    st.session_state.pop("usuario_logado", None)
+    st.session_state.pop("confirmar_saida_backup", None)
+    st.session_state.pop("backup_saida_gerado", None)
+    if not st.session_state.get("login_salvo_ativo", False):
+        st.session_state["login_salvo_usuario"] = ""
+        st.session_state.pop("login_salvo_modo", None)
+    st.rerun()
+
+
+def tela_backup_obrigatorio_saida():
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    col_esq, col_centro, col_dir = st.columns([1, 1.2, 1])
+    with col_centro:
+        st.markdown("<div class='saas-card'>", unsafe_allow_html=True)
+        st.title("Backup Obrigatorio")
+        st.warning("Antes de sair do sistema, gere um backup dos dados atuais.")
+        st.caption(f"Ultimo backup registrado: {config.get('ultimo_backup', 'Nunca')}")
+
+        if st.button("Gerar Backup Agora", type="primary", use_container_width=True):
+            zip_path = gerar_backup()
+            st.session_state["backup_saida_gerado"] = zip_path
+            st.success(f"Backup gerado com sucesso: {zip_path}")
+
+        if st.session_state.get("backup_saida_gerado"):
+            st.info("Backup concluido. Agora voce pode sair do sistema.")
+            if st.button("Sair Do Sistema", use_container_width=True):
+                concluir_saida()
+        else:
+            st.button("Sair Do Sistema", disabled=True, use_container_width=True)
+
+        if st.button("Voltar Ao Sistema", use_container_width=True):
+            st.session_state.pop("confirmar_saida_backup", None)
+            st.session_state.pop("backup_saida_gerado", None)
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+    st.stop()
+
+
 def nomes_responsaveis_frota(valor):
     nomes = []
     texto = str(valor or "")
@@ -2097,16 +2142,14 @@ st.sidebar.title("MENU")
 usuario_logado = st.session_state.get("usuario_logado", {})
 st.sidebar.caption(f"Usuário logado: {usuario_logado.get('nome', '')} | {usuario_logado.get('nivel', '')}")
 
+if st.session_state.get("confirmar_saida_backup"):
+    tela_backup_obrigatorio_saida()
+
 if usuario_logado.get("nivel") == "Responsável Frota":
     st.sidebar.divider()
     st.sidebar.markdown("<span class='status-pill'>Acesso restrito</span>", unsafe_allow_html=True)
     if st.sidebar.button("Sair", use_container_width=True):
-        st.session_state["autenticado"] = False
-        st.session_state.pop("usuario_logado", None)
-        if not st.session_state.get("login_salvo_ativo", False):
-            st.session_state["login_salvo_usuario"] = ""
-            st.session_state.pop("login_salvo_modo", None)
-        st.rerun()
+        solicitar_saida_com_backup()
     tela_responsavel_frota()
     st.stop()
 
@@ -2209,12 +2252,7 @@ st.sidebar.caption(f"Último backup: {config.get('ultimo_backup', 'Nunca')}")
 st.sidebar.caption(f"Itens críticos: {total_criticos_sidebar}")
 
 if st.sidebar.button("Sair", use_container_width=True):
-    st.session_state["autenticado"] = False
-    st.session_state.pop("usuario_logado", None)
-    if not st.session_state.get("login_salvo_ativo", False):
-        st.session_state["login_salvo_usuario"] = ""
-        st.session_state.pop("login_salvo_modo", None)
-    st.rerun()
+    solicitar_saida_com_backup()
 
 
 # =========================
