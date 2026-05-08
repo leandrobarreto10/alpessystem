@@ -2,28 +2,8 @@
     {
         "nome": "admin",
         "email": "admin",
-        "senha": "8b2110e83f8341d93ccad5388736163b036a329d147482a2f811cd930c579cae",
-        "nivel": "Administrador",
-        "criado_em": "27/04/2026 11:47"
-    },
-    {
-        "nome": "Leandro Barreto",
-        "email": "leandrobarretodp@gmail.com",
-        "nivel": "Usuário",
-        "senha": "8b2110e83f8341d93ccad5388736163b036a329d147482a2f811cd930c579cae",
-        "criado_em": "27/04/2026 12:59"
-    },
-    {
-        "nome": "Eurider",
-        "email": "",
-        "nivel": "Supervisor Base",
-        "veiculo_frota": "",
-        "veiculos_frota": [],
         "senha": "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3",
-        "criado_em": "05/05/2026 13:21",
-        "bases_permitidas": [
-            "TMG BASE SORRISO"
-        ],
-        "pode_lancar_despesa_frota": false
+        "nivel": "Administrador",
+        "criado_em": "08/05/2026 19:09"
     }
 ]
