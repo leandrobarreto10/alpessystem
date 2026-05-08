@@ -1,9 +1,16 @@
 [
     {
-        "nome": "admin",
-        "email": "admin",
-        "senha": "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3",
+        "nome": "Master",
+        "email": "leandrobarretodp@gmail.com",
+        "senha": "8b2110e83f8341d93ccad5388736163b036a329d147482a2f811cd930c579cae",
         "nivel": "Administrador",
-        "criado_em": "08/05/2026 19:09"
+        "criado_em": "08/05/2026 19:09",
+        "veiculo_frota": "",
+        "veiculos_frota": [],
+        "bases_permitidas": [
+            "TMG BASE SORRISO",
+            "TMG BASE RONDONOPOLIS"
+        ],
+        "pode_lancar_despesa_frota": true
     }
 ]

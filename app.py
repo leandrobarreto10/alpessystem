@@ -5119,7 +5119,19 @@ elif menu == "CONFIGURAÇÕES":
             st.dataframe(pd.DataFrame([{k: v for k, v in u.items() if k != "senha"} for u in usuarios]), use_container_width=True)
 
             niveis_usuario = ["Administrador", "Usuário", "Supervisor Base", "Responsável Frota"]
-            veiculos_ativos_usuarios = sorted(df_frotas_veiculos[df_frotas_veiculos["status"] != "Inativo"]["placa"].dropna().astype(str).tolist())
+            colunas_frotas_usuarios = ["placa", "modelo", "marca", "ano", "tipo", "responsavel", "cidade_local", "status", "km_atual"]
+            for coluna_frota in colunas_frotas_usuarios:
+                if coluna_frota not in df_frotas_veiculos.columns:
+                    df_frotas_veiculos[coluna_frota] = "Ativo" if coluna_frota == "status" else ""
+                df_frotas_veiculos[coluna_frota] = df_frotas_veiculos[coluna_frota].astype("object").fillna("")
+            df_frotas_veiculos.loc[df_frotas_veiculos["status"].astype(str).str.strip() == "", "status"] = "Ativo"
+
+            veiculos_ativos_usuarios = sorted(
+                df_frotas_veiculos[df_frotas_veiculos["status"].astype(str) != "Inativo"]["placa"]
+                .dropna()
+                .astype(str)
+                .tolist()
+            )
             responsaveis_frota = sorted(set(
                 nome
                 for responsavel in df_frotas_veiculos["responsavel"].dropna().astype(str).tolist()
@@ -5151,11 +5163,14 @@ elif menu == "CONFIGURAÇÕES":
                     email_user = st.text_input("Email")
                     veiculos_frota = []
                     if nivel == "Responsável Frota" or pode_lancar_despesa_frota:
-                        veiculos_sugeridos = df_frotas_veiculos[
-                            df_frotas_veiculos["responsavel"].astype(str).apply(
-                                lambda responsavel: str(nome).strip().title() in nomes_responsaveis_frota(responsavel)
-                            )
-                        ]["placa"].dropna().astype(str).tolist()
+                        if nome and "responsavel" in df_frotas_veiculos.columns and "placa" in df_frotas_veiculos.columns:
+                            veiculos_sugeridos = df_frotas_veiculos[
+                                df_frotas_veiculos["responsavel"].astype(str).apply(
+                                    lambda responsavel: str(nome).strip().title() in nomes_responsaveis_frota(responsavel)
+                                )
+                            ]["placa"].dropna().astype(str).tolist()
+                        else:
+                            veiculos_sugeridos = []
                         veiculos_frota = st.multiselect(
                             "Veículos Liberados",
                             veiculos_ativos_usuarios,
