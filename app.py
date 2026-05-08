@@ -10,12 +10,16 @@ import shutil
 import zipfile
 import base64
 try:
+    from google.auth.transport.requests import Request
     from google.oauth2 import service_account
+    from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
     from googleapiclient.errors import HttpError
     from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 except Exception:
+    Request = None
     service_account = None
+    Credentials = None
     build = None
     HttpError = None
     MediaFileUpload = None
@@ -58,12 +62,28 @@ def obter_config_secreta(nome, padrao=""):
 
 def google_drive_configurado():
     return bool(
-        service_account
-        and build
+        build
+        and (service_account or Credentials)
         and MediaFileUpload
         and MediaIoBaseDownload
         and obter_config_secreta("GOOGLE_DRIVE_FOLDER_ID", "")
     )
+
+
+def obter_google_oauth_info():
+    info = {
+        "client_id": os.environ.get("GOOGLE_OAUTH_CLIENT_ID", ""),
+        "client_secret": os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", ""),
+        "refresh_token": os.environ.get("GOOGLE_OAUTH_REFRESH_TOKEN", ""),
+        "token_uri": os.environ.get("GOOGLE_OAUTH_TOKEN_URI", "https://oauth2.googleapis.com/token"),
+    }
+    try:
+        if "google_oauth" in st.secrets:
+            segredos = dict(st.secrets["google_oauth"])
+            info.update({chave: segredos.get(chave, valor) for chave, valor in info.items()})
+    except Exception:
+        pass
+    return info if info.get("client_id") and info.get("client_secret") and info.get("refresh_token") else None
 
 
 def obter_google_service():
@@ -72,6 +92,23 @@ def obter_google_service():
         return _drive_service_cache
     if not google_drive_configurado():
         return None
+
+    oauth_info = obter_google_oauth_info()
+    if oauth_info and Credentials and Request:
+        try:
+            credenciais = Credentials(
+                token=None,
+                refresh_token=oauth_info["refresh_token"],
+                token_uri=oauth_info.get("token_uri", "https://oauth2.googleapis.com/token"),
+                client_id=oauth_info["client_id"],
+                client_secret=oauth_info["client_secret"],
+                scopes=["https://www.googleapis.com/auth/drive"]
+            )
+            credenciais.refresh(Request())
+            _drive_service_cache = build("drive", "v3", credentials=credenciais, cache_discovery=False)
+            return _drive_service_cache
+        except Exception as erro:
+            drive_guardar_erro(erro)
 
     info_conta = None
     service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
