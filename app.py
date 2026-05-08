@@ -9,6 +9,11 @@ import hashlib
 import shutil
 import zipfile
 import base64
+import mimetypes
+try:
+    from supabase import create_client
+except Exception:
+    create_client = None
 try:
     from google.auth.transport.requests import Request
     from google.oauth2 import service_account
@@ -48,6 +53,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 _drive_service_cache = None
 _drive_pastas_cache = {}
 _drive_arquivos_cache = {}
+_supabase_client_cache = None
 
 
 def obter_config_secreta(nome, padrao=""):
@@ -58,6 +64,43 @@ def obter_config_secreta(nome, padrao=""):
         return st.secrets.get(nome, padrao)
     except Exception:
         return padrao
+
+
+def supabase_bucket_nome():
+    return obter_config_secreta("SUPABASE_BUCKET", "alpes-system")
+
+
+def supabase_chave():
+    return (
+        obter_config_secreta("SUPABASE_SERVICE_ROLE_KEY", "")
+        or obter_config_secreta("SUPABASE_ANON_KEY", "")
+        or obter_config_secreta("SUPABASE_KEY", "")
+    )
+
+
+def supabase_configurado():
+    return bool(create_client and obter_config_secreta("SUPABASE_URL", "") and supabase_chave())
+
+
+def supabase_guardar_erro(erro):
+    try:
+        st.session_state["ultimo_erro_supabase"] = str(erro)[:700]
+    except Exception:
+        pass
+
+
+def obter_supabase_client():
+    global _supabase_client_cache
+    if _supabase_client_cache is not None:
+        return _supabase_client_cache
+    if not supabase_configurado():
+        return None
+    try:
+        _supabase_client_cache = create_client(obter_config_secreta("SUPABASE_URL", ""), supabase_chave())
+        return _supabase_client_cache
+    except Exception as erro:
+        supabase_guardar_erro(erro)
+        return None
 
 
 def google_drive_configurado():
@@ -139,6 +182,75 @@ def obter_google_service():
 
 def drive_relativo(caminho):
     return os.path.relpath(caminho, DATA_DIR).replace("\\", "/")
+
+
+def supabase_upload_arquivo(caminho_local):
+    client = obter_supabase_client()
+    if not client or not os.path.isfile(caminho_local):
+        return False
+    caminho_relativo = drive_relativo(caminho_local)
+    content_type = mimetypes.guess_type(caminho_local)[0] or "application/octet-stream"
+    try:
+        with open(caminho_local, "rb") as arquivo:
+            dados = arquivo.read()
+        bucket = client.storage.from_(supabase_bucket_nome())
+        try:
+            bucket.upload(
+                caminho_relativo,
+                dados,
+                file_options={"content-type": content_type, "upsert": "true"}
+            )
+        except Exception:
+            bucket.update(
+                caminho_relativo,
+                dados,
+                file_options={"content-type": content_type, "upsert": "true"}
+            )
+        return True
+    except Exception as erro:
+        supabase_guardar_erro(erro)
+        return False
+
+
+def supabase_baixar_arquivo(caminho_local, caminho_relativo):
+    client = obter_supabase_client()
+    if not client:
+        return False
+    try:
+        dados = client.storage.from_(supabase_bucket_nome()).download(caminho_relativo)
+        os.makedirs(os.path.dirname(caminho_local), exist_ok=True)
+        with open(caminho_local, "wb") as arquivo:
+            arquivo.write(dados)
+        return True
+    except Exception as erro:
+        supabase_guardar_erro(erro)
+        return False
+
+
+def sincronizar_supabase_inicio():
+    client = obter_supabase_client()
+    if not client:
+        return
+    bucket = client.storage.from_(supabase_bucket_nome())
+
+    def percorrer(pasta=""):
+        try:
+            itens = bucket.list(pasta, {"limit": 1000, "offset": 0})
+        except Exception as erro:
+            supabase_guardar_erro(erro)
+            return
+        for item in itens or []:
+            nome = item.get("name", "")
+            if not nome:
+                continue
+            rel_item = f"{pasta}/{nome}".strip("/")
+            if item.get("id") is None:
+                os.makedirs(os.path.join(DATA_DIR, rel_item), exist_ok=True)
+                percorrer(rel_item)
+            else:
+                supabase_baixar_arquivo(os.path.join(DATA_DIR, rel_item), rel_item)
+
+    percorrer("")
 
 
 def drive_guardar_erro(erro):
@@ -303,19 +415,32 @@ def sincronizar_drive_inicio():
     percorrer(pasta_raiz)
 
 
+def upload_arquivo_remoto(caminho_local):
+    if supabase_configurado():
+        return supabase_upload_arquivo(caminho_local)
+    return drive_upload_arquivo(caminho_local)
+
+
+def sincronizar_armazenamento_inicio():
+    if supabase_configurado():
+        sincronizar_supabase_inicio()
+    else:
+        sincronizar_drive_inicio()
+
+
 _pandas_to_excel_original = pd.DataFrame.to_excel
 
 
-def dataframe_to_excel_com_drive(self, excel_writer, *args, **kwargs):
+def dataframe_to_excel_com_armazenamento(self, excel_writer, *args, **kwargs):
     resultado = _pandas_to_excel_original(self, excel_writer, *args, **kwargs)
     if isinstance(excel_writer, (str, os.PathLike)):
         caminho_excel = os.path.abspath(os.fspath(excel_writer))
         if caminho_excel.startswith(os.path.abspath(DATA_DIR)):
-            drive_upload_arquivo(caminho_excel)
+            upload_arquivo_remoto(caminho_excel)
     return resultado
 
 
-pd.DataFrame.to_excel = dataframe_to_excel_com_drive
+pd.DataFrame.to_excel = dataframe_to_excel_com_armazenamento
 
 
 def caminho_dados(nome):
@@ -359,7 +484,7 @@ HOME_IMAGE = os.path.join(PASTA_IMAGENS_SISTEMA, "inicio.jpg")
 LOGIN_IMAGE = os.path.join(PASTA_IMAGENS_SISTEMA, "login.jpg")
 HOME_IMAGE_FALLBACK = os.path.join(BASE_DIR, "Desktop 1.jpg")
 BASES_FREQUENCIA = ["TMG BASE SORRISO", "TMG BASE RONDONOPOLIS"]
-sincronizar_drive_inicio()
+sincronizar_armazenamento_inicio()
 
 
 # =========================
@@ -378,7 +503,7 @@ def carregar_json(caminho, padrao):
 def salvar_json(caminho, dados):
     with open(caminho, "w", encoding="utf-8") as arquivo:
         json.dump(dados, arquivo, ensure_ascii=False, indent=4)
-    drive_upload_arquivo(caminho)
+    upload_arquivo_remoto(caminho)
 
 
 def garantir_pasta_imagens_sistema():
@@ -1636,7 +1761,7 @@ def salvar_anexo_frota(arquivo, placa, tipo_lancamento):
     caminho = os.path.join(PASTA_ANEXOS_FROTAS, f"{prefixo}_{placa_limpa}_{tipo_lancamento}_{nome_limpo}")
     with open(caminho, "wb") as destino:
         destino.write(arquivo.getbuffer())
-    drive_upload_arquivo(caminho)
+    upload_arquivo_remoto(caminho)
     return caminho
 
 
@@ -1657,10 +1782,10 @@ def salvar_imagem_produto(arquivo, codigo, produto):
         contador += 1
     with open(caminho, "wb") as destino:
         destino.write(arquivo.getbuffer())
-    if not drive_upload_arquivo(caminho):
-        erro_drive = st.session_state.get("ultimo_erro_google_drive", "")
-        detalhe = f" Detalhe: {erro_drive}" if erro_drive else ""
-        st.warning(f"Imagem salva, mas nao foi enviada ao Google Drive.{detalhe}")
+    if not upload_arquivo_remoto(caminho):
+        erro_remoto = st.session_state.get("ultimo_erro_supabase", "") or st.session_state.get("ultimo_erro_google_drive", "")
+        detalhe = f" Detalhe: {erro_remoto}" if erro_remoto else ""
+        st.warning(f"Imagem salva, mas nao foi enviada ao armazenamento online.{detalhe}")
     return nome_arquivo
 
 
@@ -4859,7 +4984,7 @@ elif menu == "ORÇAMENTOS":
                     caminho_anexo = os.path.join(PASTA_ANEXOS_ORCAMENTOS, f"{numero}_{nome_seguro}")
                     with open(caminho_anexo, "wb") as arquivo:
                         arquivo.write(anexo_orcamento.getbuffer())
-                    drive_upload_arquivo(caminho_anexo)
+                    upload_arquivo_remoto(caminho_anexo)
                 novo = pd.DataFrame([{"numero": numero, "data": data_orcamento.isoformat(), "validade": validade.isoformat(), "cliente": "" if cliente == "Não Informado" else cliente, "fornecedor": "" if fornecedor == "Não Informado" else fornecedor, "veiculo": "" if veiculo == "Não Informado" else veiculo, "tipo": tipo, "descricao": descricao, "quantidade": float(quantidade), "valor_unitario": float(valor_unitario), "valor_total": valor_total, "status": "Em Aberto", "anexo": caminho_anexo, "observacoes": observacoes}])
                 df_orcamentos = pd.concat([df_orcamentos, novo], ignore_index=True)
                 df_orcamentos.to_excel(ORCAMENTOS_XLSX, index=False)
@@ -4952,7 +5077,7 @@ elif menu == "CONFIGURAÇÕES":
                         logo_path = os.path.join(BASE_DIR, f"logo_{logo.name}")
                         with open(logo_path, "wb") as arquivo:
                             arquivo.write(logo.getbuffer())
-                        drive_upload_arquivo(logo_path) if os.path.abspath(logo_path).startswith(os.path.abspath(DATA_DIR)) else None
+                        upload_arquivo_remoto(logo_path) if os.path.abspath(logo_path).startswith(os.path.abspath(DATA_DIR)) else None
                         config["logo"] = logo_path
                     salvar_json(CONFIG_JSON, config)
                     st.success("Configurações gerais salvas.")
