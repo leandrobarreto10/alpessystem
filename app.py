@@ -437,6 +437,7 @@ def dataframe_to_excel_com_armazenamento(self, excel_writer, *args, **kwargs):
         caminho_excel = os.path.abspath(os.fspath(excel_writer))
         if caminho_excel.startswith(os.path.abspath(DATA_DIR)):
             upload_arquivo_remoto(caminho_excel)
+            marcar_backup_pendente(caminho_excel)
     return resultado
 
 
@@ -504,6 +505,24 @@ def salvar_json(caminho, dados):
     with open(caminho, "w", encoding="utf-8") as arquivo:
         json.dump(dados, arquivo, ensure_ascii=False, indent=4)
     upload_arquivo_remoto(caminho)
+    marcar_backup_pendente(caminho)
+
+
+def salvar_config_sem_marcar_backup():
+    with open(CONFIG_JSON, "w", encoding="utf-8") as arquivo:
+        json.dump(config, arquivo, ensure_ascii=False, indent=4)
+    upload_arquivo_remoto(CONFIG_JSON)
+
+
+def marcar_backup_pendente(caminho=""):
+    if "config" not in globals():
+        return
+    caminho_nome = os.path.basename(str(caminho or ""))
+    if caminho_nome == os.path.basename(CONFIG_JSON) and st.session_state.get("salvando_backup"):
+        return
+    config["alteracao_pendente_backup"] = True
+    config["ultima_alteracao"] = datetime.now().strftime("%d/%m/%Y %H:%M")
+    salvar_config_sem_marcar_backup()
 
 
 def garantir_pasta_imagens_sistema():
@@ -1756,13 +1775,20 @@ def gerar_backup():
     zip_path = shutil.make_archive(pasta_temp, "zip", pasta_temp)
     shutil.rmtree(pasta_temp, ignore_errors=True)
     config["ultimo_backup"] = datetime.now().strftime("%d/%m/%Y %H:%M")
-    salvar_json(CONFIG_JSON, config)
+    config["alteracao_pendente_backup"] = False
+    config["ultima_alteracao"] = ""
+    st.session_state["salvando_backup"] = True
+    salvar_config_sem_marcar_backup()
+    st.session_state.pop("salvando_backup", None)
     return zip_path
 
 
 def solicitar_saida_com_backup():
-    st.session_state["confirmar_saida_backup"] = True
-    st.rerun()
+    if config.get("alteracao_pendente_backup", False):
+        st.session_state["confirmar_saida_backup"] = True
+        st.rerun()
+    else:
+        concluir_saida()
 
 
 def concluir_saida():
@@ -1781,9 +1807,11 @@ def tela_backup_obrigatorio_saida():
     col_esq, col_centro, col_dir = st.columns([1, 1.2, 1])
     with col_centro:
         st.markdown("<div class='saas-card'>", unsafe_allow_html=True)
-        st.title("Backup Obrigatorio")
-        st.warning("Antes de sair do sistema, gere um backup dos dados atuais.")
+        st.title("Backup Pendente")
+        st.warning("Existem alteracoes sem backup. Gere um backup antes de sair do sistema.")
         st.caption(f"Ultimo backup registrado: {config.get('ultimo_backup', 'Nunca')}")
+        if config.get("ultima_alteracao"):
+            st.caption(f"Ultima alteracao: {config.get('ultima_alteracao')}")
 
         if st.button("Gerar Backup Agora", type="primary", use_container_width=True):
             zip_path = gerar_backup()
@@ -1829,6 +1857,7 @@ def salvar_anexo_frota(arquivo, placa, tipo_lancamento):
     with open(caminho, "wb") as destino:
         destino.write(arquivo.getbuffer())
     upload_arquivo_remoto(caminho)
+    marcar_backup_pendente(caminho)
     return caminho
 
 
@@ -1853,6 +1882,7 @@ def salvar_imagem_produto(arquivo, codigo, produto):
         erro_remoto = st.session_state.get("ultimo_erro_supabase", "") or st.session_state.get("ultimo_erro_google_drive", "")
         detalhe = f" Detalhe: {erro_remoto}" if erro_remoto else ""
         st.warning(f"Imagem salva, mas nao foi enviada ao armazenamento online.{detalhe}")
+    marcar_backup_pendente(caminho)
     return nome_arquivo
 
 
@@ -2248,7 +2278,10 @@ else:
 st.sidebar.divider()
 total_criticos_sidebar = int((df_produtos["estoque_atual"] <= df_produtos["estoque_minimo"]).sum()) if not df_produtos.empty else 0
 st.sidebar.markdown("<span class='status-pill'>Sistema online</span>", unsafe_allow_html=True)
+backup_pendente = bool(config.get("alteracao_pendente_backup", False))
+status_backup = "Pendente" if backup_pendente else "Atualizado"
 st.sidebar.caption(f"Último backup: {config.get('ultimo_backup', 'Nunca')}")
+st.sidebar.caption(f"Status do backup: {status_backup}")
 st.sidebar.caption(f"Itens críticos: {total_criticos_sidebar}")
 
 if st.sidebar.button("Sair", use_container_width=True):
@@ -5051,6 +5084,7 @@ elif menu == "ORÇAMENTOS":
                     with open(caminho_anexo, "wb") as arquivo:
                         arquivo.write(anexo_orcamento.getbuffer())
                     upload_arquivo_remoto(caminho_anexo)
+                    marcar_backup_pendente(caminho_anexo)
                 novo = pd.DataFrame([{"numero": numero, "data": data_orcamento.isoformat(), "validade": validade.isoformat(), "cliente": "" if cliente == "Não Informado" else cliente, "fornecedor": "" if fornecedor == "Não Informado" else fornecedor, "veiculo": "" if veiculo == "Não Informado" else veiculo, "tipo": tipo, "descricao": descricao, "quantidade": float(quantidade), "valor_unitario": float(valor_unitario), "valor_total": valor_total, "status": "Em Aberto", "anexo": caminho_anexo, "observacoes": observacoes}])
                 df_orcamentos = pd.concat([df_orcamentos, novo], ignore_index=True)
                 df_orcamentos.to_excel(ORCAMENTOS_XLSX, index=False)
@@ -5104,7 +5138,7 @@ elif menu == "CONFIGURAÇÕES":
         f"""
         <div class='saas-card'>
             <b>Status do sistema</b><br>
-            Sistema online &nbsp;|&nbsp; Último backup: {config.get('ultimo_backup', 'Nunca')} &nbsp;|&nbsp; Itens críticos: {total_criticos_sidebar}
+            Sistema online &nbsp;|&nbsp; Backup: {status_backup} &nbsp;|&nbsp; Último backup: {config.get('ultimo_backup', 'Nunca')} &nbsp;|&nbsp; Itens críticos: {total_criticos_sidebar}
         </div>
         """,
         unsafe_allow_html=True
@@ -5144,6 +5178,7 @@ elif menu == "CONFIGURAÇÕES":
                         with open(logo_path, "wb") as arquivo:
                             arquivo.write(logo.getbuffer())
                         upload_arquivo_remoto(logo_path) if os.path.abspath(logo_path).startswith(os.path.abspath(DATA_DIR)) else None
+                        marcar_backup_pendente(logo_path) if os.path.abspath(logo_path).startswith(os.path.abspath(DATA_DIR)) else None
                         config["logo"] = logo_path
                     salvar_json(CONFIG_JSON, config)
                     st.success("Configurações gerais salvas.")
@@ -5438,6 +5473,10 @@ elif menu == "CONFIGURAÇÕES":
 
     with tab_backup:
         st.write(f"Último backup: {config.get('ultimo_backup', 'Nunca')}")
+        if config.get("alteracao_pendente_backup", False):
+            st.warning(f"Backup pendente desde: {config.get('ultima_alteracao', 'alteracao recente')}")
+        else:
+            st.success("Backup atualizado.")
         if st.button("Gerar backup"):
             zip_path = gerar_backup()
             st.success(f"Backup gerado: {zip_path}")

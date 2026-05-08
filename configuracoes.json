@@ -10,9 +10,11 @@
     "tema": "dark",
     "cor_principal": "#6157ff",
     "fonte": "Inter",
-    "ultimo_backup": "Nunca",
+    "ultimo_backup": "08/05/2026 19:33",
     "supervisores_frequencia": {
         "TMG BASE SORRISO": "",
         "TMG BASE RONDONOPOLIS": ""
-    }
+    },
+    "alteracao_pendente_backup": false,
+    "ultima_alteracao": ""
 }
