@@ -190,26 +190,33 @@ def drive_baixar_arquivo(caminho_local, caminho_relativo):
 
 
 def drive_upload_arquivo(caminho_local):
-    service = obter_google_service()
-    if not service or not os.path.isfile(caminho_local):
+    try:
+        service = obter_google_service()
+        if not service or not os.path.isfile(caminho_local):
+            return False
+        caminho_relativo = drive_relativo(caminho_local)
+        pasta_rel = os.path.dirname(caminho_relativo).replace("\\", "/")
+        pasta_id = drive_garantir_pasta(pasta_rel)
+        if not pasta_id:
+            return False
+        media = MediaFileUpload(caminho_local, resumable=False)
+        existente = drive_encontrar_arquivo(caminho_relativo)
+        if existente:
+            service.files().update(fileId=existente["id"], media_body=media).execute()
+        else:
+            criado = service.files().create(
+                body={"name": os.path.basename(caminho_local), "parents": [pasta_id]},
+                media_body=media,
+                fields="id, name, mimeType, modifiedTime"
+            ).execute()
+            _drive_arquivos_cache[caminho_relativo] = criado
+        return True
+    except Exception as erro:
+        try:
+            st.session_state["ultimo_erro_google_drive"] = str(erro)[:500]
+        except Exception:
+            pass
         return False
-    caminho_relativo = drive_relativo(caminho_local)
-    pasta_rel = os.path.dirname(caminho_relativo).replace("\\", "/")
-    pasta_id = drive_garantir_pasta(pasta_rel)
-    if not pasta_id:
-        return False
-    media = MediaFileUpload(caminho_local, resumable=False)
-    existente = drive_encontrar_arquivo(caminho_relativo)
-    if existente:
-        service.files().update(fileId=existente["id"], media_body=media).execute()
-    else:
-        criado = service.files().create(
-            body={"name": os.path.basename(caminho_local), "parents": [pasta_id]},
-            media_body=media,
-            fields="id, name, mimeType, modifiedTime"
-        ).execute()
-        _drive_arquivos_cache[caminho_relativo] = criado
-    return True
 
 
 def sincronizar_drive_inicio():
