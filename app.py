@@ -1593,7 +1593,10 @@ def salvar_imagem_produto(arquivo, codigo, produto):
         contador += 1
     with open(caminho, "wb") as destino:
         destino.write(arquivo.getbuffer())
-    drive_upload_arquivo(caminho)
+    if not drive_upload_arquivo(caminho):
+        erro_drive = st.session_state.get("ultimo_erro_google_drive", "")
+        detalhe = f" Detalhe: {erro_drive}" if erro_drive else ""
+        st.warning(f"Imagem salva, mas nao foi enviada ao Google Drive.{detalhe}")
     return nome_arquivo
 
 
