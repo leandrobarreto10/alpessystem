@@ -810,6 +810,12 @@ if "autenticado" not in st.session_state:
     st.session_state["autenticado"] = False
 if "modo_acesso" not in st.session_state:
     st.session_state["modo_acesso"] = "Desktop"
+if "login_salvo_usuario" not in st.session_state:
+    st.session_state["login_salvo_usuario"] = ""
+if "login_salvo_ativo" not in st.session_state:
+    st.session_state["login_salvo_ativo"] = False
+if st.session_state.get("login_salvo_modo") in ["Desktop", "Mobile"]:
+    st.session_state["modo_acesso"] = st.session_state["login_salvo_modo"]
 
 if not st.session_state["autenticado"]:
     st.markdown("<br><br>", unsafe_allow_html=True)
@@ -846,9 +852,17 @@ if not st.session_state["autenticado"]:
         ):
             st.session_state["modo_acesso"] = "Desktop"
             st.rerun()
-        usuario_login = st.text_input("Usuário ou email")
+        usuario_login = st.text_input(
+            "Usuário ou email",
+            value=st.session_state.get("login_salvo_usuario", "")
+        )
         mostrar_senha = st.checkbox("Mostrar senha")
         senha_login = st.text_input("Senha", type="default" if mostrar_senha else "password")
+        salvar_login = st.checkbox(
+            "Salvar login",
+            value=bool(st.session_state.get("login_salvo_ativo", False)),
+            help="Salva o usuário/email e mantém a sessão neste navegador. A senha não fica gravada."
+        )
         if st.button("Entrar", use_container_width=True):
             usuarios = garantir_usuario_admin()
             usuario_encontrado = next(
@@ -871,6 +885,14 @@ if not st.session_state["autenticado"]:
                     "pode_lancar_despesa_frota": usuario_encontrado.get("pode_lancar_despesa_frota", False),
                     "modo_acesso": st.session_state["modo_acesso"]
                 }
+                if salvar_login:
+                    st.session_state["login_salvo_usuario"] = usuario_login.strip()
+                    st.session_state["login_salvo_ativo"] = True
+                    st.session_state["login_salvo_modo"] = st.session_state["modo_acesso"]
+                else:
+                    st.session_state["login_salvo_usuario"] = ""
+                    st.session_state["login_salvo_ativo"] = False
+                    st.session_state.pop("login_salvo_modo", None)
                 st.rerun()
             else:
                 st.error("Login inválido. Verifique usuário/email e senha.")
@@ -2081,6 +2103,9 @@ if usuario_logado.get("nivel") == "Responsável Frota":
     if st.sidebar.button("Sair", use_container_width=True):
         st.session_state["autenticado"] = False
         st.session_state.pop("usuario_logado", None)
+        if not st.session_state.get("login_salvo_ativo", False):
+            st.session_state["login_salvo_usuario"] = ""
+            st.session_state.pop("login_salvo_modo", None)
         st.rerun()
     tela_responsavel_frota()
     st.stop()
@@ -2186,6 +2211,9 @@ st.sidebar.caption(f"Itens críticos: {total_criticos_sidebar}")
 if st.sidebar.button("Sair", use_container_width=True):
     st.session_state["autenticado"] = False
     st.session_state.pop("usuario_logado", None)
+    if not st.session_state.get("login_salvo_ativo", False):
+        st.session_state["login_salvo_usuario"] = ""
+        st.session_state.pop("login_salvo_modo", None)
     st.rerun()
 
 
