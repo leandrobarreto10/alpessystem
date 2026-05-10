@@ -432,12 +432,19 @@ _pandas_to_excel_original = pd.DataFrame.to_excel
 
 
 def dataframe_to_excel_com_armazenamento(self, excel_writer, *args, **kwargs):
+    if isinstance(excel_writer, (str, os.PathLike)):
+        caminho_excel = os.path.abspath(os.fspath(excel_writer))
+        if caminho_excel.startswith(os.path.abspath(DATA_DIR)) and usuario_somente_consulta(st.session_state.get("usuario_logado", {})):
+            st.error("Perfil de consulta não pode alterar dados.")
+            registrar_auditoria("BLOQUEAR_ALTERACAO", "PERMISSÕES", os.path.basename(caminho_excel), os.path.basename(caminho_excel))
+            return None
     resultado = _pandas_to_excel_original(self, excel_writer, *args, **kwargs)
     if isinstance(excel_writer, (str, os.PathLike)):
         caminho_excel = os.path.abspath(os.fspath(excel_writer))
         if caminho_excel.startswith(os.path.abspath(DATA_DIR)):
             upload_arquivo_remoto(caminho_excel)
             marcar_backup_pendente(caminho_excel)
+            registrar_auditoria("SALVAR_ARQUIVO", "DADOS", os.path.basename(caminho_excel), os.path.basename(caminho_excel))
     return resultado
 
 
@@ -477,6 +484,7 @@ BASES_TRANSFERENCIAS_XLSX = caminho_dados("bases_transferencias.xlsx")
 PASTA_ANEXOS_ORCAMENTOS = caminho_dados("Anexos Orçamentos")
 PASTA_ANEXOS_FROTAS = caminho_dados("Anexos Frotas")
 USUARIOS_JSON = caminho_dados("usuarios.json")
+AUDITORIA_JSON = caminho_dados("auditoria.json")
 CONFIG_JSON = caminho_dados("configuracoes.json")
 CATEGORIAS_JSON = caminho_dados("categorias.json")
 UNIDADES_JSON = caminho_dados("unidades.json")
@@ -506,6 +514,32 @@ def salvar_json(caminho, dados):
         json.dump(dados, arquivo, ensure_ascii=False, indent=4)
     upload_arquivo_remoto(caminho)
     marcar_backup_pendente(caminho)
+
+
+def registrar_auditoria(acao, modulo="", detalhe="", registro="", antes=None, depois=None):
+    try:
+        usuario = st.session_state.get("usuario_logado", {})
+    except Exception:
+        usuario = {}
+    item = {
+        "data_hora": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+        "usuario": usuario.get("nome", "sistema") if isinstance(usuario, dict) else "sistema",
+        "nivel": usuario.get("nivel", "") if isinstance(usuario, dict) else "",
+        "acao": str(acao),
+        "modulo": str(modulo),
+        "registro": str(registro),
+        "detalhe": str(detalhe),
+        "antes": json.dumps(antes, ensure_ascii=False, default=str)[:1200] if antes is not None else "",
+        "depois": json.dumps(depois, ensure_ascii=False, default=str)[:1200] if depois is not None else "",
+    }
+    historico = carregar_json(AUDITORIA_JSON, [])
+    if not isinstance(historico, list):
+        historico = []
+    historico.append(item)
+    historico = historico[-5000:]
+    with open(AUDITORIA_JSON, "w", encoding="utf-8") as arquivo:
+        json.dump(historico, arquivo, ensure_ascii=False, indent=4)
+    upload_arquivo_remoto(AUDITORIA_JSON)
 
 
 def salvar_config_sem_marcar_backup():
@@ -552,6 +586,7 @@ def garantir_usuario_admin():
             "email": "admin",
             "senha": hash_senha("123"),
             "nivel": "Administrador",
+            "status": "Ativo",
             "criado_em": datetime.now().strftime("%d/%m/%Y %H:%M")
         }]
         salvar_json(USUARIOS_JSON, usuarios)
@@ -572,6 +607,9 @@ def configuracao_padrao():
         "cor_principal": "#6157ff",
         "fonte": "Inter",
         "ultimo_backup": "Nunca",
+        "backup_automatico_diario": True,
+        "alteracao_pendente_backup": False,
+        "ultima_alteracao": "",
         "supervisores_frequencia": {
             "TMG BASE SORRISO": "",
             "TMG BASE RONDONOPOLIS": ""
@@ -604,6 +642,8 @@ usuarios = garantir_usuario_admin()
 config = carregar_json(CONFIG_JSON, configuracao_padrao())
 if "supervisores_frequencia" not in config or not isinstance(config.get("supervisores_frequencia"), dict):
     config["supervisores_frequencia"] = {}
+for chave_config, valor_config in configuracao_padrao().items():
+    config.setdefault(chave_config, valor_config)
 for base_frequencia in BASES_FREQUENCIA:
     config["supervisores_frequencia"].setdefault(base_frequencia, "")
 categorias_config = carregar_json(CATEGORIAS_JSON, categorias_padrao())
@@ -892,7 +932,9 @@ if not st.session_state["autenticado"]:
                 ),
                 None
             )
-            if usuario_encontrado and usuario_encontrado.get("senha") == hash_senha(senha_login):
+            if usuario_encontrado and usuario_encontrado.get("status", "Ativo") == "Inativo":
+                st.error("Usuário inativo. Fale com o administrador.")
+            elif usuario_encontrado and usuario_encontrado.get("senha") == hash_senha(senha_login):
                 st.session_state["autenticado"] = True
                 st.session_state["usuario_logado"] = {
                     "nome": usuario_encontrado.get("nome", ""),
@@ -1052,9 +1094,11 @@ except Exception:
         "observacoes"
     ])
 
-for col in ["codigo", "produto", "categoria", "estoque_minimo", "localizacao", "imagem", "unidade", "valor_unitario", "fornecedor"]:
+for col in ["codigo", "produto", "categoria", "estoque_minimo", "localizacao", "imagem", "unidade", "valor_unitario", "fornecedor", "status"]:
     if col not in df_produtos.columns:
-        df_produtos[col] = ""
+        df_produtos[col] = "Ativo" if col == "status" else ""
+df_produtos["status"] = df_produtos["status"].astype("object").fillna("")
+df_produtos.loc[df_produtos["status"].astype(str).str.strip() == "", "status"] = "Ativo"
 
 for col in ["produto", "tipo", "quantidade", "data", "cliente", "observacao"]:
     if col not in df_mov.columns:
@@ -1443,6 +1487,46 @@ def usuario_pode_lancar_despesa_frota(usuario):
     return usuario.get("nivel") in ["Administrador", "Supervisor Base", "Responsável Frota"] or bool(usuario.get("pode_lancar_despesa_frota", False))
 
 
+
+PERMISSOES_PERFIL = {
+    "Administrador": ["INICIO", "ALMOXARIFADO", "BASES", "FROTAS", "PATRIMÔNIO", "ORÇAMENTOS", "CONFIGURAÇÕES"],
+    "Administrativo": ["INICIO", "ALMOXARIFADO", "BASES", "FROTAS", "PATRIMÔNIO", "ORÇAMENTOS"],
+    "Usuário": ["INICIO", "ALMOXARIFADO", "FROTAS", "ORÇAMENTOS"],
+    "Supervisor Base": ["INICIO", "BASES"],
+    "Responsável Frota": ["FROTAS"],
+    "Consulta": ["INICIO", "ALMOXARIFADO", "BASES", "FROTAS", "PATRIMÔNIO", "ORÇAMENTOS"],
+}
+
+
+def modulos_permitidos_usuario(usuario):
+    nivel = usuario.get("nivel", "Usuário") if isinstance(usuario, dict) else "Usuário"
+    return PERMISSOES_PERFIL.get(nivel, PERMISSOES_PERFIL["Usuário"])
+
+
+def usuario_somente_consulta(usuario):
+    return isinstance(usuario, dict) and usuario.get("nivel") == "Consulta"
+
+
+def bloquear_se_consulta(usuario, mensagem="Perfil de consulta não pode alterar dados."):
+    if usuario_somente_consulta(usuario):
+        st.error(mensagem)
+        return True
+    return False
+
+
+def texto_obrigatorio(valor):
+    return bool(str(valor or "").strip())
+
+
+def valor_duplicado(df, coluna, valor, ignorar_indice=None):
+    if df.empty or coluna not in df.columns:
+        return False
+    serie = df[coluna].astype(str).str.strip().str.upper()
+    alvo = str(valor or "").strip().upper()
+    if ignorar_indice is not None and ignorar_indice in serie.index:
+        serie = serie.drop(index=ignorar_indice)
+    return bool((serie == alvo).any())
+
 def formatar_colunas_tabela(df):
     df_formatado = df.copy()
     df_formatado.columns = [
@@ -1769,7 +1853,7 @@ def gerar_backup():
     nome = f"backup_estoque_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     pasta_temp = os.path.join(BACKUP_DIR, nome)
     os.makedirs(pasta_temp, exist_ok=True)
-    for caminho in [PRODUTOS_XLSX, MOVIMENTACOES_XLSX, CLIENTES_XLSX, FORNECEDORES_XLSX, CONTROLE_FALTAS_XLSX, FROTAS_VEICULOS_XLSX, FROTAS_ABASTECIMENTOS_XLSX, FROTAS_MANUTENCOES_XLSX, FROTAS_DOCUMENTOS_XLSX, ORCAMENTOS_XLSX, PATRIMONIO_XLSX, PATRIMONIO_CUSTOS_XLSX, PATRIMONIO_MOVIMENTACOES_XLSX, PATRIMONIO_INSUMOS_XLSX, BASES_MOVIMENTACOES_XLSX, BASES_TRANSFERENCIAS_XLSX, USUARIOS_JSON, CONFIG_JSON, CATEGORIAS_JSON, UNIDADES_JSON]:
+    for caminho in [PRODUTOS_XLSX, MOVIMENTACOES_XLSX, CLIENTES_XLSX, FORNECEDORES_XLSX, CONTROLE_FALTAS_XLSX, FROTAS_VEICULOS_XLSX, FROTAS_ABASTECIMENTOS_XLSX, FROTAS_MANUTENCOES_XLSX, FROTAS_DOCUMENTOS_XLSX, ORCAMENTOS_XLSX, PATRIMONIO_XLSX, PATRIMONIO_CUSTOS_XLSX, PATRIMONIO_MOVIMENTACOES_XLSX, PATRIMONIO_INSUMOS_XLSX, BASES_MOVIMENTACOES_XLSX, BASES_TRANSFERENCIAS_XLSX, USUARIOS_JSON, AUDITORIA_JSON, CONFIG_JSON, CATEGORIAS_JSON, UNIDADES_JSON]:
         if os.path.exists(caminho):
             shutil.copy2(caminho, os.path.join(pasta_temp, os.path.basename(caminho)))
     zip_path = shutil.make_archive(pasta_temp, "zip", pasta_temp)
@@ -1831,6 +1915,25 @@ def tela_backup_obrigatorio_saida():
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
+
+
+def executar_backup_automatico_diario():
+    if st.session_state.get("backup_automatico_verificado"):
+        return
+    st.session_state["backup_automatico_verificado"] = True
+    if not config.get("backup_automatico_diario", True):
+        return
+    ultimo = pd.to_datetime(config.get("ultimo_backup", ""), dayfirst=True, errors="coerce")
+    hoje = datetime.now().date()
+    if pd.isna(ultimo) or ultimo.date() < hoje:
+        try:
+            caminho_backup = gerar_backup()
+            registrar_auditoria("BACKUP_AUTOMATICO", "BACKUP", caminho_backup, os.path.basename(caminho_backup))
+        except Exception as erro:
+            st.session_state["erro_backup_automatico"] = str(erro)[:500]
+
+
+executar_backup_automatico_diario()
 
 
 def nomes_responsaveis_frota(valor):
@@ -2217,6 +2320,8 @@ else:
         st.session_state["menu"] = "PRODUTOS"
 
     modulos_menu = ["INICIO", "ALMOXARIFADO", "BASES", "FROTAS", "PATRIMÔNIO", "ORÇAMENTOS", "CONFIGURAÇÕES"]
+    permissoes_modulos = modulos_permitidos_usuario(usuario_logado)
+    modulos_menu = [modulo_item for modulo_item in modulos_menu if modulo_item in permissoes_modulos] or ["INICIO"]
     opcoes_almoxarifado = [
         "ESTOQUE",
         "COMPRAS",
@@ -2344,36 +2449,36 @@ if menu == "INICIO":
             st.session_state["alerta_lancamentos_frota_ok"] = assinatura_lancamentos_inicio
             st.rerun()
 
+    faltas_mes = 0
+    if not df_faltas.empty:
+        datas_faltas_inicio = pd.to_datetime(df_faltas["data"], errors="coerce")
+        mes_atual = datetime.now().month
+        ano_atual = datetime.now().year
+        faltas_mes = int(((datas_faltas_inicio.dt.month == mes_atual) & (datas_faltas_inicio.dt.year == ano_atual) & (df_faltas["presenca"].astype(str).str.upper() == "FALTA")).sum())
+    produtos_criticos_inicio = int((df_produtos["estoque_atual"] <= df_produtos["estoque_minimo"]).sum()) if not df_produtos.empty else 0
+    despesas_pendentes_inicio = int((df_frotas_abastecimentos["status_conferencia"].astype(str) == "Pendente").sum()) + int((df_frotas_manutencoes["status_conferencia"].astype(str) == "Pendente").sum())
+    frequencias_hoje = 0
+    if not df_faltas.empty:
+        frequencias_hoje = int((pd.to_datetime(df_faltas["data"], errors="coerce").dt.date == datetime.now().date()).sum())
+    status_backup_inicio = "Pendente" if config.get("alteracao_pendente_backup", False) else "Atualizado"
+
+    st.subheader("Painel Gerencial")
+    p1, p2, p3, p4 = st.columns(4)
+    p1.markdown(f"<div class='metric-card'><div class='metric-label'>Faltas No Mês</div><div class='metric-value'>{faltas_mes}</div></div>", unsafe_allow_html=True)
+    p2.markdown(f"<div class='metric-card'><div class='metric-label'>Produtos Críticos</div><div class='metric-value'>{produtos_criticos_inicio}</div></div>", unsafe_allow_html=True)
+    p3.markdown(f"<div class='metric-card'><div class='metric-label'>Frequência Hoje</div><div class='metric-value'>{'OK' if frequencias_hoje else 'Pendente'}</div></div>", unsafe_allow_html=True)
+    p4.markdown(f"<div class='metric-card'><div class='metric-label'>Despesas Frota</div><div class='metric-value'>{despesas_pendentes_inicio}</div></div>", unsafe_allow_html=True)
+    st.caption(f"Backup: {status_backup_inicio} | Último backup: {config.get('ultimo_backup', 'Nunca')}")
+
+    auditoria_inicio = carregar_json(AUDITORIA_JSON, [])
+    if auditoria_inicio:
+        st.subheader("Últimas Ações")
+        st.dataframe(formatar_colunas_tabela(pd.DataFrame(auditoria_inicio[-8:])), use_container_width=True, hide_index=True)
+
     imagem_inicio = HOME_IMAGE if os.path.exists(HOME_IMAGE) else HOME_IMAGE_FALLBACK
     if os.path.exists(imagem_inicio):
-        st.markdown(
-            f"""
-            <style>
-                body {{
-                    overflow: hidden;
-                }}
-                [data-testid="stAppViewContainer"] {{
-                    overflow: hidden;
-                }}
-                section.main {{
-                    overflow: hidden;
-                }}
-                section.main > div {{
-                    padding: 0 !important;
-                    max-width: 100% !important;
-                }}
-                .block-container,
-                [data-testid="stMainBlockContainer"] {{
-                    padding: 0 !important;
-                    max-width: 100% !important;
-                }}
-            </style>
-            <div class="home-fullscreen-lock">
-                <img src='data:image/jpeg;base64,{imagem_base64(imagem_inicio)}' class='home-img'>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+        with st.expander("Imagem da tela inicial", expanded=False):
+            st.image(imagem_inicio, use_container_width=True)
     else:
         st.warning(f"Imagem não encontrada: {HOME_IMAGE}. Verifique se o caminho está correto e a imagem existe.")
 
@@ -2752,13 +2857,15 @@ elif menu == "MOVIMENTAÇÃO":
 elif menu == "PRODUTOS":
     st.title("PRODUTOS")
 
-    categorias = [item.get("nome", "") for item in categorias_config] or ["MANUTENÇÃO", "ELÉTRICA", "HIDRÁULICA", "LIMPEZA", "COPA", "JARDINAGEM"]
-    unidades = [item.get("nome", "") for item in unidades_config if item.get("nome", "")] or ["UN"]
+    categorias = [item.get("nome", "") for item in categorias_config if item.get("status", "Ativo") != "Inativo"] or ["MANUTENÇÃO", "ELÉTRICA", "HIDRÁULICA", "LIMPEZA", "COPA", "JARDINAGEM"]
+    unidades = [item.get("nome", "") for item in unidades_config if item.get("nome", "") and item.get("status", "Ativo") != "Inativo"] or ["UN"]
     fornecedores = df_fornecedores[df_fornecedores["status"] != "Inativo"]["nome_fornecedor"].dropna().tolist()
     fornecedores_opcoes = ["Não informado"] + fornecedores
 
     if "acao" not in st.session_state:
         st.session_state["acao"] = "Adicionar"
+    if st.session_state["acao"] == "Excluir":
+        st.session_state["acao"] = "Inativar"
 
     col1, col2, col3 = st.columns(3)
 
@@ -2768,8 +2875,8 @@ elif menu == "PRODUTOS":
     if col2.button("✏️ Editar", type="primary" if st.session_state["acao"] == "Editar" else "secondary"):
         st.session_state["acao"] = "Editar"
 
-    if col3.button("🗑️ Excluir", type="primary" if st.session_state["acao"] == "Excluir" else "secondary"):
-        st.session_state["acao"] = "Excluir"
+    if col3.button("Inativar", type="primary" if st.session_state["acao"] == "Inativar" else "secondary"):
+        st.session_state["acao"] = "Inativar"
 
     acao = st.session_state["acao"]
 
@@ -2787,6 +2894,14 @@ elif menu == "PRODUTOS":
         imagem_manual = st.text_input("Imagem Atual / Nome Do Arquivo", help="Opcional. Use somente se a imagem já estiver na pasta Imagens Produtos.")
 
         if st.button("Salvar"):
+            if bloquear_se_consulta(usuario_logado):
+                st.stop()
+            elif not texto_obrigatorio(produto):
+                st.error("Informe o nome do produto.")
+                st.stop()
+            elif valor_duplicado(df_produtos[df_produtos["status"].astype(str) != "Inativo"], "produto", produto):
+                st.error("Ja existe um produto ativo com esse nome.")
+                st.stop()
             imagem = salvar_imagem_produto(imagem_upload, codigo, produto) if imagem_upload else imagem_manual.strip()
             novo = pd.DataFrame([{
                 "codigo": codigo,
@@ -2797,11 +2912,13 @@ elif menu == "PRODUTOS":
                 "valor_unitario": valor_unitario,
                 "fornecedor": "" if fornecedor == "Não informado" else fornecedor,
                 "localizacao": local,
-                "imagem": imagem
+                "imagem": imagem,
+                "status": "Ativo"
             }])
 
             df_produtos = pd.concat([df_produtos, novo], ignore_index=True)
             df_produtos.to_excel(PRODUTOS_XLSX, index=False)
+            registrar_auditoria("CRIAR", "PRODUTOS", "Produto cadastrado", produto)
             st.success("Adicionado")
             st.rerun()
 
@@ -2830,6 +2947,12 @@ elif menu == "PRODUTOS":
             imagem_manual = st.text_input("Imagem Atual / Nome Do Arquivo", imagem_atual)
 
             if st.button("Salvar Alteração"):
+                if bloquear_se_consulta(usuario_logado):
+                    st.stop()
+                elif not texto_obrigatorio(codigo):
+                    st.error("Informe o codigo do produto.")
+                    st.stop()
+                antes_produto = dados.to_dict()
                 imagem = salvar_imagem_produto(imagem_upload, codigo, prod) if imagem_upload else imagem_manual.strip()
                 df_produtos.loc[df_produtos["produto"] == prod, "codigo"] = codigo
                 df_produtos.loc[df_produtos["produto"] == prod, "categoria"] = categoria
@@ -2841,18 +2964,29 @@ elif menu == "PRODUTOS":
                 df_produtos.loc[df_produtos["produto"] == prod, "imagem"] = imagem
 
                 df_produtos.to_excel(PRODUTOS_XLSX, index=False)
+                depois_produto = df_produtos[df_produtos["produto"] == prod].iloc[0].to_dict()
+                registrar_auditoria("EDITAR", "PRODUTOS", "Produto alterado", prod, antes_produto, depois_produto)
                 st.success("Atualizado")
 
-    elif acao == "Excluir":
+    elif acao == "Inativar":
         if df_produtos.empty:
             st.info("Nenhum produto cadastrado.")
         else:
-            prod = st.selectbox("Produto", df_produtos["produto"])
+            produtos_ativos = df_produtos[df_produtos["status"].astype(str) != "Inativo"]
+            if produtos_ativos.empty:
+                st.info("Nenhum produto ativo para inativar.")
+            else:
+                prod = st.selectbox("Produto", produtos_ativos["produto"])
 
-            if st.button("Excluir"):
-                df_produtos = df_produtos[df_produtos["produto"] != prod]
-                df_produtos.to_excel(PRODUTOS_XLSX, index=False)
-                st.success("Excluído")
+                if st.button("Inativar"):
+                    if bloquear_se_consulta(usuario_logado):
+                        st.stop()
+                    antes_produto = df_produtos[df_produtos["produto"] == prod].iloc[0].to_dict()
+                    df_produtos.loc[df_produtos["produto"] == prod, "status"] = "Inativo"
+                    df_produtos.to_excel(PRODUTOS_XLSX, index=False)
+                    registrar_auditoria("INATIVAR", "PRODUTOS", "Produto inativado", prod, antes_produto, {"status": "Inativo"})
+                    st.success("Produto inativado")
+                    st.rerun()
 
 
 # =========================
@@ -2863,10 +2997,12 @@ elif menu == "CLIENTES":
 
     if "acao_cliente" not in st.session_state:
         st.session_state["acao_cliente"] = "Adicionar"
+    if st.session_state["acao_cliente"] == "Excluir":
+        st.session_state["acao_cliente"] = "Inativar"
     if "cliente_selecionado_codigo" not in st.session_state:
         st.session_state["cliente_selecionado_codigo"] = ""
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
 
     if col1.button("➕ Adicionar", key="cliente_adicionar", type="primary" if st.session_state["acao_cliente"] == "Adicionar" else "secondary"):
         st.session_state["acao_cliente"] = "Adicionar"
@@ -2874,10 +3010,7 @@ elif menu == "CLIENTES":
     if col2.button("✏️ Editar", key="cliente_editar", type="primary" if st.session_state["acao_cliente"] == "Editar" else "secondary"):
         st.session_state["acao_cliente"] = "Editar"
 
-    if col3.button("🗑️ Excluir", key="cliente_excluir", type="primary" if st.session_state["acao_cliente"] == "Excluir" else "secondary"):
-        st.session_state["acao_cliente"] = "Excluir"
-
-    if col4.button("⛔ Inativar", key="cliente_inativar", type="primary" if st.session_state["acao_cliente"] == "Inativar" else "secondary"):
+    if col3.button("⛔ Inativar", key="cliente_inativar", type="primary" if st.session_state["acao_cliente"] == "Inativar" else "secondary"):
         st.session_state["acao_cliente"] = "Inativar"
 
     acao_cliente = st.session_state["acao_cliente"]
@@ -2898,6 +3031,14 @@ elif menu == "CLIENTES":
             data_final = c_data2.date_input("DATA FINAL")
 
         if st.button("Salvar cliente"):
+            if bloquear_se_consulta(usuario_logado):
+                st.stop()
+            elif not texto_obrigatorio(nome_cliente):
+                st.error("Informe o nome do cliente.")
+                st.stop()
+            elif valor_duplicado(df_clientes[df_clientes["status"].astype(str) != "Inativo"], "nome_cliente", nome_cliente):
+                st.error("J? existe um cliente ativo com esse nome.")
+                st.stop()
             novo = pd.DataFrame([{
                 "codigo": codigo,
                 "nome_cliente": nome_cliente,
@@ -2912,6 +3053,7 @@ elif menu == "CLIENTES":
 
             df_clientes = pd.concat([df_clientes, novo], ignore_index=True)
             df_clientes.to_excel(CLIENTES_XLSX, index=False)
+            registrar_auditoria("CRIAR", "CLIENTES", "Cliente cadastrado", nome_cliente)
             st.success("Cliente adicionado")
 
     elif acao_cliente == "Editar":
@@ -2949,7 +3091,13 @@ elif menu == "CLIENTES":
                 data_final = c_data2.date_input("DATA FINAL", value=data_final_padrao.date() if pd.notna(data_final_padrao) else datetime.now().date())
 
             if st.button("Salvar alteração do cliente"):
+                if bloquear_se_consulta(usuario_logado):
+                    st.stop()
+                elif not texto_obrigatorio(nome_cliente):
+                    st.error("Informe o nome do cliente.")
+                    st.stop()
                 linha_cliente = df_clientes["codigo"].astype(str) == str(cliente_codigo)
+                antes_cliente = df_clientes[linha_cliente].iloc[0].to_dict()
                 df_clientes.loc[linha_cliente, "codigo"] = str(codigo)
                 df_clientes.loc[linha_cliente, "nome_cliente"] = str(nome_cliente)
                 df_clientes.loc[linha_cliente, "telefone"] = str(telefone)
@@ -2960,18 +3108,9 @@ elif menu == "CLIENTES":
                 df_clientes.loc[linha_cliente, "data_final"] = str(data_final)
                 df_clientes.loc[linha_cliente, "status"] = str(status)
                 df_clientes.to_excel(CLIENTES_XLSX, index=False)
+                depois_cliente = df_clientes[linha_cliente].iloc[0].to_dict()
+                registrar_auditoria("EDITAR", "CLIENTES", "Cliente alterado", str(cliente_codigo), antes_cliente, depois_cliente)
                 st.success("Cliente atualizado")
-
-    elif acao_cliente == "Excluir":
-        if df_clientes.empty:
-            st.info("Nenhum cliente cadastrado.")
-        else:
-            cliente = st.selectbox("Cliente", df_clientes["nome_cliente"])
-
-            if st.button("Excluir cliente"):
-                df_clientes = df_clientes[df_clientes["nome_cliente"] != cliente]
-                df_clientes.to_excel(CLIENTES_XLSX, index=False)
-                st.success("Cliente excluído")
 
     elif acao_cliente == "Inativar":
         clientes_ativos = df_clientes[df_clientes["status"] != "Inativo"].copy()
@@ -2991,8 +3130,13 @@ elif menu == "CLIENTES":
             )
 
             if st.button("Inativar cliente"):
+                if bloquear_se_consulta(usuario_logado):
+                    st.stop()
+                linha_cliente = df_clientes["codigo"].astype(str) == str(cliente_codigo)
+                antes_cliente = df_clientes[linha_cliente].iloc[0].to_dict()
                 df_clientes.loc[df_clientes["codigo"].astype(str) == str(cliente_codigo), "status"] = "Inativo"
                 df_clientes.to_excel(CLIENTES_XLSX, index=False)
+                registrar_auditoria("INATIVAR", "CLIENTES", "Cliente inativado", str(cliente_codigo), antes_cliente, {"status": "Inativo"})
                 st.success("Cliente inativado")
 
     st.divider()
@@ -3031,8 +3175,10 @@ elif menu == "FORNECEDOR":
 
     if "acao_fornecedor" not in st.session_state:
         st.session_state["acao_fornecedor"] = "Adicionar"
+    if st.session_state["acao_fornecedor"] == "Excluir":
+        st.session_state["acao_fornecedor"] = "Inativar"
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
 
     if col1.button("➕ Adicionar", key="fornecedor_adicionar", type="primary" if st.session_state["acao_fornecedor"] == "Adicionar" else "secondary"):
         st.session_state["acao_fornecedor"] = "Adicionar"
@@ -3040,10 +3186,7 @@ elif menu == "FORNECEDOR":
     if col2.button("✏️ Editar", key="fornecedor_editar", type="primary" if st.session_state["acao_fornecedor"] == "Editar" else "secondary"):
         st.session_state["acao_fornecedor"] = "Editar"
 
-    if col3.button("🗑️ Excluir", key="fornecedor_excluir", type="primary" if st.session_state["acao_fornecedor"] == "Excluir" else "secondary"):
-        st.session_state["acao_fornecedor"] = "Excluir"
-
-    if col4.button("⛔ Inativar", key="fornecedor_inativar", type="primary" if st.session_state["acao_fornecedor"] == "Inativar" else "secondary"):
+    if col3.button("⛔ Inativar", key="fornecedor_inativar", type="primary" if st.session_state["acao_fornecedor"] == "Inativar" else "secondary"):
         st.session_state["acao_fornecedor"] = "Inativar"
 
     acao_fornecedor = st.session_state["acao_fornecedor"]
@@ -3057,6 +3200,14 @@ elif menu == "FORNECEDOR":
         estado = st.text_input("ESTADO")
 
         if st.button("Salvar fornecedor"):
+            if bloquear_se_consulta(usuario_logado):
+                st.stop()
+            elif not texto_obrigatorio(nome_fornecedor):
+                st.error("Informe o nome do fornecedor.")
+                st.stop()
+            elif valor_duplicado(df_fornecedores[df_fornecedores["status"].astype(str) != "Inativo"], "nome_fornecedor", nome_fornecedor):
+                st.error("J? existe um fornecedor ativo com esse nome.")
+                st.stop()
             novo = pd.DataFrame([{
                 "codigo": codigo,
                 "nome_fornecedor": nome_fornecedor,
@@ -3071,6 +3222,7 @@ elif menu == "FORNECEDOR":
 
             df_fornecedores = pd.concat([df_fornecedores, novo], ignore_index=True)
             df_fornecedores.to_excel(FORNECEDORES_XLSX, index=False)
+            registrar_auditoria("CRIAR", "FORNECEDORES", "Fornecedor cadastrado", nome_fornecedor)
             st.success("Fornecedor adicionado")
 
     elif acao_fornecedor == "Editar":
@@ -3088,7 +3240,13 @@ elif menu == "FORNECEDOR":
             status = st.selectbox("STATUS", ["Ativo", "Inativo"], index=0 if dados["status"] == "Ativo" else 1)
 
             if st.button("Salvar alteração do fornecedor"):
+                if bloquear_se_consulta(usuario_logado):
+                    st.stop()
+                elif not texto_obrigatorio(nome_fornecedor):
+                    st.error("Informe o nome do fornecedor.")
+                    st.stop()
                 linha_fornecedor = df_fornecedores["nome_fornecedor"] == fornecedor_sel
+                antes_fornecedor = df_fornecedores[linha_fornecedor].iloc[0].to_dict()
                 df_fornecedores.loc[linha_fornecedor, "codigo"] = str(codigo)
                 df_fornecedores.loc[linha_fornecedor, "nome_fornecedor"] = str(nome_fornecedor)
                 df_fornecedores.loc[linha_fornecedor, "telefone"] = str(telefone)
@@ -3096,18 +3254,9 @@ elif menu == "FORNECEDOR":
                 df_fornecedores.loc[linha_fornecedor, "estado"] = str(estado)
                 df_fornecedores.loc[linha_fornecedor, "status"] = str(status)
                 df_fornecedores.to_excel(FORNECEDORES_XLSX, index=False)
+                depois_fornecedor = df_fornecedores[df_fornecedores["nome_fornecedor"] == str(nome_fornecedor)].iloc[0].to_dict()
+                registrar_auditoria("EDITAR", "FORNECEDORES", "Fornecedor alterado", fornecedor_sel, antes_fornecedor, depois_fornecedor)
                 st.success("Fornecedor atualizado")
-
-    elif acao_fornecedor == "Excluir":
-        if df_fornecedores.empty:
-            st.info("Nenhum fornecedor cadastrado.")
-        else:
-            fornecedor_sel = st.selectbox("Fornecedor", df_fornecedores["nome_fornecedor"])
-
-            if st.button("Excluir fornecedor"):
-                df_fornecedores = df_fornecedores[df_fornecedores["nome_fornecedor"] != fornecedor_sel]
-                df_fornecedores.to_excel(FORNECEDORES_XLSX, index=False)
-                st.success("Fornecedor excluído")
 
     elif acao_fornecedor == "Inativar":
         fornecedores_ativos = df_fornecedores[df_fornecedores["status"] != "Inativo"].copy()
@@ -3117,8 +3266,12 @@ elif menu == "FORNECEDOR":
             fornecedor_sel = st.selectbox("Fornecedor", fornecedores_ativos["nome_fornecedor"])
 
             if st.button("Inativar fornecedor"):
+                if bloquear_se_consulta(usuario_logado):
+                    st.stop()
+                antes_fornecedor = df_fornecedores[df_fornecedores["nome_fornecedor"] == fornecedor_sel].iloc[0].to_dict()
                 df_fornecedores.loc[df_fornecedores["nome_fornecedor"] == fornecedor_sel, "status"] = "Inativo"
                 df_fornecedores.to_excel(FORNECEDORES_XLSX, index=False)
+                registrar_auditoria("INATIVAR", "FORNECEDORES", "Fornecedor inativado", fornecedor_sel, antes_fornecedor, {"status": "Inativo"})
                 st.success("Fornecedor inativado")
 
     st.divider()
@@ -3663,13 +3816,15 @@ elif menu in ["CONTROLE DE FALTAS", "BASES"]:
                     st.rerun()
 
             st.divider()
-            st.subheader("Excluir lançamento")
-            registro_excluir = st.selectbox("Registro para excluir", list(opcoes_registros.keys()), key="faltas_excluir")
+            st.subheader("Cancelar lançamento")
+            registro_excluir = st.selectbox("Registro para cancelar", list(opcoes_registros.keys()), key="faltas_excluir")
             idx_excluir = opcoes_registros[registro_excluir]
-            if st.button("Excluir registro de frequência"):
+            if st.button("Cancelar registro de frequência"):
+                registro_cancelado = df_faltas.loc[idx_excluir].to_dict()
                 df_faltas = df_faltas.drop(index=idx_excluir).reset_index(drop=True)
                 df_faltas.drop(columns=["data_dt"], errors="ignore").to_excel(CONTROLE_FALTAS_XLSX, index=False)
-                st.success("Registro excluído.")
+                registrar_auditoria("CANCELAR", "FREQUÊNCIA", "Registro de frequência cancelado", registro_excluir, registro_cancelado, None)
+                st.success("Registro cancelado.")
                 st.rerun()
 
     elif subtela_faltas == "COLABORADORES":
@@ -3805,28 +3960,7 @@ elif menu in ["CONTROLE DE FALTAS", "BASES"]:
             st.info("Nenhum colaborador ativo para inativar.")
 
         st.divider()
-        st.subheader("Excluir colaborador")
-        if todos_colaboradores:
-            colaborador_excluir = st.selectbox("COLABORADOR PARA EXCLUIR", todos_colaboradores, key="colaborador_excluir")
-            confirmar_exclusao = st.checkbox(
-                "Confirmo que desejo excluir este colaborador e todos os registros vinculados a ele.",
-                key="confirmar_excluir_colaborador"
-            )
-            if st.button("EXCLUIR COLABORADOR"):
-                if not confirmar_exclusao:
-                    st.error("Marque a confirmação antes de excluir o colaborador.")
-                else:
-                    df_faltas = df_faltas[
-                        ~(
-                            (df_faltas["base_frequencia"] == base_faltas_atual)
-                            & (df_faltas["colaborador"] == colaborador_excluir)
-                        )
-                    ].reset_index(drop=True)
-                    df_faltas.drop(columns=["data_dt"], errors="ignore").to_excel(CONTROLE_FALTAS_XLSX, index=False)
-                    st.success("Colaborador excluído.")
-                    st.rerun()
-        else:
-            st.info("Nenhum colaborador cadastrado para excluir.")
+        st.info("Para manter o histórico, colaboradores não são excluídos. Use a opção de inativar acima.")
 
         st.dataframe(formatar_colunas_tabela(df_colaboradores.drop(columns=colunas_escala_ocultas, errors="ignore")), use_container_width=True, hide_index=True)
 
@@ -5149,8 +5283,8 @@ elif menu == "CONFIGURAÇÕES":
     admin_logado = usuario_atual.get("nivel") == "Administrador"
 
     if admin_logado:
-        tab_geral, tab_usuarios, tab_estoque, tab_categorias, tab_unidades, tab_aparencia, tab_backup = st.tabs([
-            "GERAL", "USUÁRIOS", "ESTOQUE", "CATEGORIAS", "UNIDADE", "APARÊNCIA", "BACKUP"
+        tab_geral, tab_usuarios, tab_estoque, tab_categorias, tab_unidades, tab_aparencia, tab_backup, tab_auditoria = st.tabs([
+            "GERAL", "USUÁRIOS", "ESTOQUE", "CATEGORIAS", "UNIDADE", "APARÊNCIA", "BACKUP", "AUDITORIA"
         ])
     else:
         tab_usuarios, tab_aparencia, tab_backup = st.tabs([
@@ -5238,7 +5372,7 @@ elif menu == "CONFIGURAÇÕES":
                 for responsavel in df_frotas_veiculos["responsavel"].dropna().astype(str).tolist()
                 for nome in nomes_responsaveis_frota(responsavel)
             ))
-            acao_usuario = st.radio("Ação", ["Criar", "Editar", "Excluir"], horizontal=True)
+            acao_usuario = st.radio("Ação", ["Criar", "Editar", "Inativar"], horizontal=True)
             if acao_usuario == "Criar":
                 nivel = st.selectbox("Nível", niveis_usuario, key="nivel_criar_usuario")
                 bases_permitidas = st.multiselect(
@@ -5301,9 +5435,11 @@ elif menu == "CONFIGURAÇÕES":
                                 "bases_permitidas": BASES_FREQUENCIA if nivel == "Administrador" else bases_permitidas,
                                 "pode_lancar_despesa_frota": bool(pode_lancar_despesa_frota),
                                 "senha": hash_senha(senha),
+                                "status": "Ativo",
                                 "criado_em": datetime.now().strftime("%d/%m/%Y %H:%M")
                             })
                             salvar_json(USUARIOS_JSON, usuarios)
+                            registrar_auditoria("CRIAR", "USUÁRIOS", "Usuário criado", nome)
                             st.success("Usuário criado.")
                             st.rerun()
 
@@ -5319,6 +5455,11 @@ elif menu == "CONFIGURAÇÕES":
                         if nivel_atual not in niveis_usuario:
                             nivel_atual = "Usuário"
                         nivel = st.selectbox("Nível", niveis_usuario, index=niveis_usuario.index(nivel_atual))
+                        status_usuario = st.selectbox(
+                            "Status",
+                            ["Ativo", "Inativo"],
+                            index=0 if usuarios[idx].get("status", "Ativo") != "Inativo" else 1
+                        )
                         bases_atuais = usuarios[idx].get("bases_permitidas", [])
                         if isinstance(bases_atuais, str):
                             bases_atuais = [bases_atuais] if bases_atuais.strip() else []
@@ -5350,6 +5491,7 @@ elif menu == "CONFIGURAÇÕES":
                             usuarios[idx]["nome"] = nome
                             usuarios[idx]["email"] = email_user
                             usuarios[idx]["nivel"] = nivel
+                            usuarios[idx]["status"] = status_usuario
                             usuarios[idx]["veiculo_frota"] = veiculos_frota[0] if len(veiculos_frota) == 1 else ""
                             usuarios[idx]["veiculos_frota"] = veiculos_frota
                             usuarios[idx]["bases_permitidas"] = BASES_FREQUENCIA if nivel == "Administrador" else bases_permitidas
@@ -5360,19 +5502,21 @@ elif menu == "CONFIGURAÇÕES":
                             st.success("Usuário atualizado.")
                             st.rerun()
 
-            elif acao_usuario == "Excluir":
+            elif acao_usuario == "Inativar":
                 if usuarios:
                     nomes = [u["nome"] for u in usuarios]
-                    selecionado = st.selectbox("Usuário", nomes, key="excluir_usuario")
-                    if st.button("Excluir usuário"):
+                    selecionado = st.selectbox("Usuário", nomes, key="inativar_usuario")
+                    if st.button("Inativar usuário"):
                         usuario = next(u for u in usuarios if u["nome"] == selecionado)
                         admins = [u for u in usuarios if u.get("nivel") == "Administrador"]
                         if usuario.get("nivel") == "Administrador" and len(admins) <= 1:
-                            st.error("Não é permitido excluir o último administrador.")
+                            st.error("Não é permitido inativar o último administrador.")
                         else:
-                            usuarios = [u for u in usuarios if u["nome"] != selecionado]
+                            antes_usuario = dict(usuario)
+                            usuario["status"] = "Inativo"
                             salvar_json(USUARIOS_JSON, usuarios)
-                            st.success("Usuário excluído.")
+                            registrar_auditoria("INATIVAR", "USUÁRIOS", "Usuário inativado", selecionado, antes_usuario, usuario)
+                            st.success("Usuário inativado.")
                             st.rerun()
 
     if admin_logado:
@@ -5390,15 +5534,16 @@ elif menu == "CONFIGURAÇÕES":
 
         with tab_categorias:
             st.dataframe(pd.DataFrame(categorias_config), use_container_width=True)
-            acao_cat = st.radio("Ação de categoria", ["Adicionar", "Editar", "Excluir"], horizontal=True)
+            acao_cat = st.radio("Ação de categoria", ["Adicionar", "Editar", "Inativar"], horizontal=True)
 
             if acao_cat == "Adicionar":
                 nome_cat = st.text_input("Nome da categoria")
                 cor_cat = st.color_picker("Cor", "#6157ff")
                 if st.button("Adicionar categoria"):
                     if nome_cat:
-                        categorias_config.append({"nome": nome_cat.upper(), "cor": cor_cat})
+                        categorias_config.append({"nome": nome_cat.upper(), "cor": cor_cat, "status": "Ativo"})
                         salvar_json(CATEGORIAS_JSON, categorias_config)
+                        registrar_auditoria("CRIAR", "CATEGORIAS", "Categoria criada", nome_cat.upper())
                         st.success("Categoria adicionada.")
                         st.rerun()
 
@@ -5408,32 +5553,43 @@ elif menu == "CONFIGURAÇÕES":
                 idx = nomes_cat.index(selecionada)
                 nome_cat = st.text_input("Nome", categorias_config[idx]["nome"])
                 cor_cat = st.color_picker("Cor", categorias_config[idx].get("cor", "#6157ff"))
+                status_cat = st.selectbox("Status", ["Ativo", "Inativo"], index=0 if categorias_config[idx].get("status", "Ativo") != "Inativo" else 1, key="status_cat")
                 if st.button("Salvar categoria"):
-                    categorias_config[idx] = {"nome": nome_cat.upper(), "cor": cor_cat}
+                    antes_cat = dict(categorias_config[idx])
+                    categorias_config[idx] = {"nome": nome_cat.upper(), "cor": cor_cat, "status": status_cat}
                     salvar_json(CATEGORIAS_JSON, categorias_config)
+                    registrar_auditoria("EDITAR", "CATEGORIAS", "Categoria alterada", selecionada, antes_cat, categorias_config[idx])
                     st.success("Categoria atualizada.")
                     st.rerun()
 
-            elif acao_cat == "Excluir" and categorias_config:
-                nomes_cat = [c["nome"] for c in categorias_config]
-                selecionada = st.selectbox("Categoria", nomes_cat, key="excluir_cat")
-                if st.button("Excluir categoria"):
-                    categorias_config = [c for c in categorias_config if c["nome"] != selecionada]
-                    salvar_json(CATEGORIAS_JSON, categorias_config)
-                    st.success("Categoria excluída.")
-                    st.rerun()
+            elif acao_cat == "Inativar" and categorias_config:
+                categorias_ativas = [c for c in categorias_config if c.get("status", "Ativo") != "Inativo"]
+                nomes_cat = [c["nome"] for c in categorias_ativas]
+                if nomes_cat:
+                    selecionada = st.selectbox("Categoria", nomes_cat, key="inativar_cat")
+                    if st.button("Inativar categoria"):
+                        idx_cat = next(i for i, c in enumerate(categorias_config) if c["nome"] == selecionada)
+                        antes_cat = dict(categorias_config[idx_cat])
+                        categorias_config[idx_cat]["status"] = "Inativo"
+                        salvar_json(CATEGORIAS_JSON, categorias_config)
+                        registrar_auditoria("INATIVAR", "CATEGORIAS", "Categoria inativada", selecionada, antes_cat, categorias_config[idx_cat])
+                        st.success("Categoria inativada.")
+                        st.rerun()
+                else:
+                    st.info("Nenhuma categoria ativa para inativar.")
 
         with tab_unidades:
             st.dataframe(pd.DataFrame(unidades_config), use_container_width=True)
-            acao_unidade = st.radio("Ação de unidade", ["Adicionar", "Editar", "Excluir"], horizontal=True)
+            acao_unidade = st.radio("Ação de unidade", ["Adicionar", "Editar", "Inativar"], horizontal=True)
 
             if acao_unidade == "Adicionar":
                 nome_unidade = st.text_input("Nome da unidade")
                 cor_unidade = st.color_picker("Cor", "#38bdf8", key="cor_unidade_add")
                 if st.button("Adicionar unidade"):
                     if nome_unidade:
-                        unidades_config.append({"nome": nome_unidade.upper(), "cor": cor_unidade})
+                        unidades_config.append({"nome": nome_unidade.upper(), "cor": cor_unidade, "status": "Ativo"})
                         salvar_json(UNIDADES_JSON, unidades_config)
+                        registrar_auditoria("CRIAR", "UNIDADES", "Unidade criada", nome_unidade.upper())
                         st.success("Unidade adicionada.")
                         st.rerun()
 
@@ -5443,20 +5599,30 @@ elif menu == "CONFIGURAÇÕES":
                 idx = nomes_unidade.index(selecionada)
                 nome_unidade = st.text_input("Nome", unidades_config[idx]["nome"], key="nome_unidade_edit")
                 cor_unidade = st.color_picker("Cor", unidades_config[idx].get("cor", "#38bdf8"), key="cor_unidade_edit")
+                status_unidade = st.selectbox("Status", ["Ativo", "Inativo"], index=0 if unidades_config[idx].get("status", "Ativo") != "Inativo" else 1, key="status_unidade")
                 if st.button("Salvar unidade"):
-                    unidades_config[idx] = {"nome": nome_unidade.upper(), "cor": cor_unidade}
+                    antes_unidade = dict(unidades_config[idx])
+                    unidades_config[idx] = {"nome": nome_unidade.upper(), "cor": cor_unidade, "status": status_unidade}
                     salvar_json(UNIDADES_JSON, unidades_config)
+                    registrar_auditoria("EDITAR", "UNIDADES", "Unidade alterada", selecionada, antes_unidade, unidades_config[idx])
                     st.success("Unidade atualizada.")
                     st.rerun()
 
-            elif acao_unidade == "Excluir" and unidades_config:
-                nomes_unidade = [u["nome"] for u in unidades_config]
-                selecionada = st.selectbox("Unidade", nomes_unidade, key="excluir_unidade")
-                if st.button("Excluir unidade"):
-                    unidades_config = [u for u in unidades_config if u["nome"] != selecionada]
-                    salvar_json(UNIDADES_JSON, unidades_config)
-                    st.success("Unidade excluída.")
-                    st.rerun()
+            elif acao_unidade == "Inativar" and unidades_config:
+                unidades_ativas = [u for u in unidades_config if u.get("status", "Ativo") != "Inativo"]
+                nomes_unidade = [u["nome"] for u in unidades_ativas]
+                if nomes_unidade:
+                    selecionada = st.selectbox("Unidade", nomes_unidade, key="inativar_unidade")
+                    if st.button("Inativar unidade"):
+                        idx_unidade = next(i for i, u in enumerate(unidades_config) if u["nome"] == selecionada)
+                        antes_unidade = dict(unidades_config[idx_unidade])
+                        unidades_config[idx_unidade]["status"] = "Inativo"
+                        salvar_json(UNIDADES_JSON, unidades_config)
+                        registrar_auditoria("INATIVAR", "UNIDADES", "Unidade inativada", selecionada, antes_unidade, unidades_config[idx_unidade])
+                        st.success("Unidade inativada.")
+                        st.rerun()
+                else:
+                    st.info("Nenhuma unidade ativa para inativar.")
 
     with tab_aparencia:
         with st.form("form_aparencia"):
@@ -5473,6 +5639,12 @@ elif menu == "CONFIGURAÇÕES":
 
     with tab_backup:
         st.write(f"Último backup: {config.get('ultimo_backup', 'Nunca')}")
+        backup_auto = st.toggle("Backup automático diário", value=bool(config.get("backup_automatico_diario", True)))
+        if backup_auto != bool(config.get("backup_automatico_diario", True)):
+            config["backup_automatico_diario"] = bool(backup_auto)
+            salvar_json(CONFIG_JSON, config)
+            registrar_auditoria("CONFIGURAR", "BACKUP", f"Backup automático diário: {backup_auto}", "backup_automatico_diario")
+            st.rerun()
         if config.get("alteracao_pendente_backup", False):
             st.warning(f"Backup pendente desde: {config.get('ultima_alteracao', 'alteracao recente')}")
         else:
@@ -5500,3 +5672,19 @@ elif menu == "CONFIGURAÇÕES":
                             shutil.move(extraido, destino)
             st.success("Backup restaurado.")
             st.rerun()
+
+    if admin_logado:
+        with tab_auditoria:
+            st.subheader("Histórico De Auditoria")
+            auditoria = carregar_json(AUDITORIA_JSON, [])
+            if auditoria:
+                df_auditoria = pd.DataFrame(auditoria)
+                modulo_auditoria = st.selectbox(
+                    "Módulo",
+                    ["Todos"] + sorted(df_auditoria.get("modulo", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
+                )
+                if modulo_auditoria != "Todos":
+                    df_auditoria = df_auditoria[df_auditoria["modulo"].astype(str) == modulo_auditoria]
+                st.dataframe(formatar_colunas_tabela(df_auditoria.tail(300).iloc[::-1]), use_container_width=True, hide_index=True)
+            else:
+                st.info("Nenhuma ação registrada ainda.")
