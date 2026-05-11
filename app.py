@@ -428,23 +428,34 @@ def sincronizar_armazenamento_inicio():
         sincronizar_drive_inicio()
 
 
-_pandas_to_excel_original = pd.DataFrame.to_excel
+if not hasattr(pd.DataFrame, "_alpes_to_excel_original"):
+    pd.DataFrame._alpes_to_excel_original = pd.DataFrame.to_excel
 
 
 def dataframe_to_excel_com_armazenamento(self, excel_writer, *args, **kwargs):
     if isinstance(excel_writer, (str, os.PathLike)):
         caminho_excel = os.path.abspath(os.fspath(excel_writer))
-        if caminho_excel.startswith(os.path.abspath(DATA_DIR)) and usuario_somente_consulta(st.session_state.get("usuario_logado", {})):
+        usuario_atual = st.session_state.get("usuario_logado", {})
+        perfil_consulta = (
+            globals().get("usuario_somente_consulta", lambda usuario: isinstance(usuario, dict) and usuario.get("nivel") == "Consulta")
+        )
+        if caminho_excel.startswith(os.path.abspath(DATA_DIR)) and perfil_consulta(usuario_atual):
             st.error("Perfil de consulta não pode alterar dados.")
-            registrar_auditoria("BLOQUEAR_ALTERACAO", "PERMISSÕES", os.path.basename(caminho_excel), os.path.basename(caminho_excel))
+            if "registrar_auditoria" in globals():
+                registrar_auditoria("BLOQUEAR_ALTERACAO", "PERMISSÕES", os.path.basename(caminho_excel), os.path.basename(caminho_excel))
             return None
-    resultado = _pandas_to_excel_original(self, excel_writer, *args, **kwargs)
+    resultado = pd.DataFrame._alpes_to_excel_original(self, excel_writer, *args, **kwargs)
     if isinstance(excel_writer, (str, os.PathLike)):
         caminho_excel = os.path.abspath(os.fspath(excel_writer))
         if caminho_excel.startswith(os.path.abspath(DATA_DIR)):
-            upload_arquivo_remoto(caminho_excel)
-            marcar_backup_pendente(caminho_excel)
-            registrar_auditoria("SALVAR_ARQUIVO", "DADOS", os.path.basename(caminho_excel), os.path.basename(caminho_excel))
+            try:
+                upload_arquivo_remoto(caminho_excel)
+            except Exception as erro:
+                st.session_state["ultimo_erro_armazenamento"] = str(erro)[:1200]
+            if "marcar_backup_pendente" in globals():
+                marcar_backup_pendente(caminho_excel)
+            if "registrar_auditoria" in globals():
+                registrar_auditoria("SALVAR_ARQUIVO", "DADOS", os.path.basename(caminho_excel), os.path.basename(caminho_excel))
     return resultado
 
 
