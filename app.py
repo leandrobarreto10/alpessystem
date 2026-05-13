@@ -559,6 +559,128 @@ def salvar_config_sem_marcar_backup():
     upload_arquivo_remoto(CONFIG_JSON)
 
 
+def detectar_pasta_backup_nuvem():
+    candidatos = [
+        os.environ.get("BACKUP_NUVEM_PATH", ""),
+        os.path.join(os.path.expanduser("~"), "OneDrive", "Backups Sistema Alpes"),
+        os.path.join(os.path.expanduser("~"), "OneDrive"),
+        os.environ.get("GOOGLE_DRIVE_PATH", ""),
+        os.path.join(os.path.expanduser("~"), "Google Drive"),
+        os.path.join(os.path.expanduser("~"), "My Drive"),
+        os.path.join(os.path.expanduser("~"), "Meu Drive"),
+        os.path.join(os.path.expanduser("~"), "GoogleDrive"),
+        r"G:\Meu Drive",
+        r"G:\My Drive",
+        r"G:\\",
+    ]
+    for candidato in candidatos:
+        if candidato and os.path.isdir(candidato):
+            if os.path.basename(candidato).lower() == "backups sistema alpes":
+                return candidato
+            return os.path.join(candidato, "Backups Sistema Alpes")
+    return ""
+
+
+def obter_pasta_backup_nuvem():
+    pasta_config = str(config.get("backup_google_drive_pasta", "")).strip()
+    if pasta_config:
+        return pasta_config
+    return detectar_pasta_backup_nuvem()
+
+
+def copiar_backup_nuvem(zip_path):
+    if not config.get("backup_google_drive_ativo", True):
+        return ""
+    pasta_drive = obter_pasta_backup_nuvem()
+    if not pasta_drive:
+        st.session_state["ultimo_erro_backup_google_drive"] = "OneDrive/Google Drive nao encontrado. Informe a pasta de backup em nuvem na aba Backup."
+        return ""
+    try:
+        os.makedirs(pasta_drive, exist_ok=True)
+        destino = os.path.join(pasta_drive, os.path.basename(zip_path))
+        shutil.copy2(zip_path, destino)
+        config["backup_google_drive_pasta"] = pasta_drive
+        config["ultimo_backup_google_drive"] = datetime.now().strftime("%d/%m/%Y %H:%M")
+        st.session_state.pop("ultimo_erro_backup_google_drive", None)
+        return destino
+    except Exception as erro:
+        st.session_state["ultimo_erro_backup_google_drive"] = str(erro)[:500]
+        return ""
+
+
+def backup_local_mais_recente():
+    if not os.path.isdir(BACKUP_DIR):
+        return ""
+    arquivos = [
+        os.path.join(BACKUP_DIR, nome)
+        for nome in os.listdir(BACKUP_DIR)
+        if nome.lower().endswith(".zip") and os.path.isfile(os.path.join(BACKUP_DIR, nome))
+    ]
+    if not arquivos:
+        return ""
+    return max(arquivos, key=os.path.getmtime)
+
+
+def backup_nuvem_mais_recente():
+    pasta_nuvem = obter_pasta_backup_nuvem()
+    if not pasta_nuvem or not os.path.isdir(pasta_nuvem):
+        return ""
+    arquivos = [
+        os.path.join(pasta_nuvem, nome)
+        for nome in os.listdir(pasta_nuvem)
+        if nome.lower().endswith(".zip") and os.path.isfile(os.path.join(pasta_nuvem, nome))
+    ]
+    if not arquivos:
+        return ""
+    return max(arquivos, key=os.path.getmtime)
+
+
+def arquivos_permitidos_backup():
+    return [
+        "produtos.xlsx", "movimentacoes.xlsx", "clientes.xlsx", "fornecedores.xlsx",
+        "controle_faltas.xlsx", "frotas_veiculos.xlsx", "frotas_abastecimentos.xlsx",
+        "frotas_manutencoes.xlsx", "frotas_documentos.xlsx", "orcamentos.xlsx",
+        "patrimonio.xlsx", "patrimonio_custos.xlsx", "patrimonio_movimentacoes.xlsx",
+        "patrimonio_insumos_base.xlsx", "bases_movimentacoes.xlsx", "bases_transferencias.xlsx",
+        "usuarios.json", "auditoria.json", "configuracoes.json", "categorias.json", "unidades.json"
+    ]
+
+
+def pastas_permitidas_backup():
+    return [
+        "Imagens Produtos",
+        "Imagens Sistema",
+        "Anexos Orçamentos",
+        "Anexos Frotas",
+    ]
+
+
+def arquivo_raiz_permitido_backup(nome):
+    extensoes = {".xlsx", ".xlsm", ".json", ".png", ".jpg", ".jpeg", ".pdf"}
+    return os.path.splitext(nome)[1].lower() in extensoes
+
+
+def restaurar_backup_zip(caminho_zip):
+    ignorar_pastas_restore = {"backups", "__pycache__", ".git", ".venv", "venv"}
+    with zipfile.ZipFile(caminho_zip, "r") as zip_ref:
+        for nome in zip_ref.namelist():
+            partes = [parte for parte in nome.replace("\\", "/").split("/") if parte]
+            if not partes:
+                continue
+            if partes[0] in ignorar_pastas_restore or any(parte in {"..", ""} for parte in partes):
+                continue
+            destino = os.path.abspath(os.path.join(DATA_DIR, *partes))
+            data_dir_abs = os.path.abspath(DATA_DIR)
+            if os.path.commonpath([data_dir_abs, destino]) != data_dir_abs:
+                continue
+            if nome.endswith("/"):
+                os.makedirs(destino, exist_ok=True)
+                continue
+            os.makedirs(os.path.dirname(destino), exist_ok=True)
+            with zip_ref.open(nome) as origem, open(destino, "wb") as arquivo_destino:
+                shutil.copyfileobj(origem, arquivo_destino)
+
+
 def marcar_backup_pendente(caminho=""):
     if "config" not in globals():
         return
@@ -573,6 +695,7 @@ def marcar_backup_pendente(caminho=""):
 def garantir_pasta_imagens_sistema():
     os.makedirs(PASTA_IMAGENS, exist_ok=True)
     os.makedirs(PASTA_IMAGENS_SISTEMA, exist_ok=True)
+    os.makedirs(PASTA_ANEXOS_ORCAMENTOS, exist_ok=True)
     os.makedirs(PASTA_ANEXOS_FROTAS, exist_ok=True)
     if not os.path.exists(HOME_IMAGE) and os.path.exists(HOME_IMAGE_FALLBACK):
         shutil.copy2(HOME_IMAGE_FALLBACK, HOME_IMAGE)
@@ -619,6 +742,9 @@ def configuracao_padrao():
         "fonte": "Inter",
         "ultimo_backup": "Nunca",
         "backup_automatico_diario": True,
+        "backup_google_drive_ativo": True,
+        "backup_google_drive_pasta": "",
+        "ultimo_backup_google_drive": "Nunca",
         "alteracao_pendente_backup": False,
         "ultima_alteracao": "",
         "supervisores_frequencia": {
@@ -1864,14 +1990,32 @@ def gerar_backup():
     nome = f"backup_estoque_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     pasta_temp = os.path.join(BACKUP_DIR, nome)
     os.makedirs(pasta_temp, exist_ok=True)
-    for caminho in [PRODUTOS_XLSX, MOVIMENTACOES_XLSX, CLIENTES_XLSX, FORNECEDORES_XLSX, CONTROLE_FALTAS_XLSX, FROTAS_VEICULOS_XLSX, FROTAS_ABASTECIMENTOS_XLSX, FROTAS_MANUTENCOES_XLSX, FROTAS_DOCUMENTOS_XLSX, ORCAMENTOS_XLSX, PATRIMONIO_XLSX, PATRIMONIO_CUSTOS_XLSX, PATRIMONIO_MOVIMENTACOES_XLSX, PATRIMONIO_INSUMOS_XLSX, BASES_MOVIMENTACOES_XLSX, BASES_TRANSFERENCIAS_XLSX, USUARIOS_JSON, AUDITORIA_JSON, CONFIG_JSON, CATEGORIAS_JSON, UNIDADES_JSON]:
-        if os.path.exists(caminho):
-            shutil.copy2(caminho, os.path.join(pasta_temp, os.path.basename(caminho)))
+    ignorar_pastas = {"backups", "__pycache__", ".git", ".venv", "venv"}
+    ignorar_extensoes = {".pyc", ".tmp", ".log"}
+    data_dir_abs = os.path.abspath(DATA_DIR)
+    for raiz, dirs, arquivos in os.walk(DATA_DIR):
+        dirs[:] = [
+            pasta for pasta in dirs
+            if pasta not in ignorar_pastas
+        ]
+        rel_raiz = os.path.relpath(raiz, data_dir_abs)
+        destino_raiz = pasta_temp if rel_raiz == "." else os.path.join(pasta_temp, rel_raiz)
+        os.makedirs(destino_raiz, exist_ok=True)
+        for arquivo in arquivos:
+            if arquivo.startswith("~$") or os.path.splitext(arquivo)[1].lower() in ignorar_extensoes:
+                continue
+            origem = os.path.join(raiz, arquivo)
+            if os.path.abspath(origem).startswith(os.path.abspath(BACKUP_DIR)):
+                continue
+            shutil.copy2(origem, os.path.join(destino_raiz, arquivo))
     zip_path = shutil.make_archive(pasta_temp, "zip", pasta_temp)
     shutil.rmtree(pasta_temp, ignore_errors=True)
+    destino_google_drive = copiar_backup_nuvem(zip_path)
     config["ultimo_backup"] = datetime.now().strftime("%d/%m/%Y %H:%M")
     config["alteracao_pendente_backup"] = False
     config["ultima_alteracao"] = ""
+    if destino_google_drive:
+        config["ultimo_backup_google_drive"] = datetime.now().strftime("%d/%m/%Y %H:%M")
     st.session_state["salvando_backup"] = True
     salvar_config_sem_marcar_backup()
     st.session_state.pop("salvando_backup", None)
@@ -5650,12 +5794,28 @@ elif menu == "CONFIGURAÇÕES":
 
     with tab_backup:
         st.write(f"Último backup: {config.get('ultimo_backup', 'Nunca')}")
+        st.write(f"Último backup em nuvem: {config.get('ultimo_backup_google_drive', 'Nunca')}")
         backup_auto = st.toggle("Backup automático diário", value=bool(config.get("backup_automatico_diario", True)))
         if backup_auto != bool(config.get("backup_automatico_diario", True)):
             config["backup_automatico_diario"] = bool(backup_auto)
             salvar_json(CONFIG_JSON, config)
             registrar_auditoria("CONFIGURAR", "BACKUP", f"Backup automático diário: {backup_auto}", "backup_automatico_diario")
             st.rerun()
+        backup_drive_ativo = st.toggle("Copiar backup para OneDrive / Google Drive", value=bool(config.get("backup_google_drive_ativo", True)))
+        pasta_drive_atual = obter_pasta_backup_nuvem()
+        pasta_drive = st.text_input(
+            "Pasta de backup em nuvem",
+            value=pasta_drive_atual,
+            placeholder=r"C:\Users\Dell\OneDrive\Backups Sistema Alpes"
+        ).strip()
+        if backup_drive_ativo != bool(config.get("backup_google_drive_ativo", True)) or pasta_drive != str(config.get("backup_google_drive_pasta", "")).strip():
+            config["backup_google_drive_ativo"] = bool(backup_drive_ativo)
+            config["backup_google_drive_pasta"] = pasta_drive
+            salvar_config_sem_marcar_backup()
+            registrar_auditoria("CONFIGURAR", "BACKUP", f"Backup em nuvem: {backup_drive_ativo} | {pasta_drive}", "backup_nuvem")
+        erro_drive_backup = st.session_state.get("ultimo_erro_backup_google_drive", "")
+        if erro_drive_backup:
+            st.warning(erro_drive_backup)
         if config.get("alteracao_pendente_backup", False):
             st.warning(f"Backup pendente desde: {config.get('ultima_alteracao', 'alteracao recente')}")
         else:
@@ -5663,24 +5823,38 @@ elif menu == "CONFIGURAÇÕES":
         if st.button("Gerar backup"):
             zip_path = gerar_backup()
             st.success(f"Backup gerado: {zip_path}")
+            destino_drive = os.path.join(config.get("backup_google_drive_pasta", ""), os.path.basename(zip_path)) if config.get("backup_google_drive_pasta") else ""
+            if destino_drive and os.path.exists(destino_drive):
+                st.success(f"Cópia em nuvem criada: {destino_drive}")
+
+        if st.button("Sincronizar backup em nuvem", use_container_width=True):
+            zip_recente = backup_nuvem_mais_recente()
+            if not zip_recente:
+                st.warning("Nenhum backup encontrado na pasta de nuvem.")
+            else:
+                try:
+                    restaurar_backup_zip(zip_recente)
+                    registrar_auditoria("SINCRONIZAR", "BACKUP", f"Backup restaurado da nuvem: {zip_recente}", os.path.basename(zip_recente))
+                    if os.path.exists(PRODUTOS_XLSX):
+                        try:
+                            qtd_produtos_restaurados = len(pd.read_excel(PRODUTOS_XLSX))
+                            st.info(f"Produtos restaurados no arquivo: {qtd_produtos_restaurados}")
+                        except Exception:
+                            pass
+                    st.success(f"Último backup da nuvem restaurado: {zip_recente}")
+                    st.rerun()
+                except Exception as erro:
+                    st.error(f"Não foi possível restaurar o backup da nuvem: {erro}")
 
         backup_upload = st.file_uploader("Restaurar backup", type=["zip"])
         if backup_upload and st.button("Restaurar backup agora"):
-            with zipfile.ZipFile(backup_upload, "r") as zip_ref:
-                for nome in zip_ref.namelist():
-                    if os.path.basename(nome) in [
-                        "produtos.xlsx", "movimentacoes.xlsx", "clientes.xlsx", "fornecedores.xlsx",
-                        "controle_faltas.xlsx", "frotas_veiculos.xlsx", "frotas_abastecimentos.xlsx",
-                        "frotas_manutencoes.xlsx", "frotas_documentos.xlsx", "orcamentos.xlsx",
-                        "patrimonio.xlsx", "patrimonio_custos.xlsx", "patrimonio_movimentacoes.xlsx",
-                        "patrimonio_insumos_base.xlsx", "bases_movimentacoes.xlsx", "bases_transferencias.xlsx", "usuarios.json",
-                        "configuracoes.json", "categorias.json", "unidades.json"
-                    ]:
-                        zip_ref.extract(nome, BASE_DIR)
-                        extraido = os.path.join(BASE_DIR, nome)
-                        destino = os.path.join(BASE_DIR, os.path.basename(nome))
-                        if extraido != destino:
-                            shutil.move(extraido, destino)
+            restaurar_backup_zip(backup_upload)
+            if os.path.exists(PRODUTOS_XLSX):
+                try:
+                    qtd_produtos_restaurados = len(pd.read_excel(PRODUTOS_XLSX))
+                    st.info(f"Produtos restaurados no arquivo: {qtd_produtos_restaurados}")
+                except Exception:
+                    pass
             st.success("Backup restaurado.")
             st.rerun()
 
